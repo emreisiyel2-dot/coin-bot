@@ -1,0 +1,12 @@
+ccxt>=4.3.0
+pandas>=2.2.0
+# pandas-ta Python 3.12+ gerektirir; ta paketi Python 3.11 ile uyumludur
+ta>=0.11.0
+fastapi>=0.111.0
+uvicorn>=0.29.0
+jinja2>=3.1.4
+python-dotenv>=1.0.1
+pytest>=8.2.0
+pytest-mock>=3.14.0
+httpx>=0.27.0
+numpy>=1.26.0
