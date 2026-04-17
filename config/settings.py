@@ -69,12 +69,25 @@ SCANNER_CONFIG = {
 }
 
 BREAKOUT_CONFIG = {
-    "ema_period":        _int("BREAKOUT_EMA_PERIOD", 100),
-    "breakout_period":   _int("BREAKOUT_PERIOD", 20),
-    "volume_avg_period": _int("BREAKOUT_VOL_AVG_PERIOD", 20),
-    "volume_multiplier": _float("BREAKOUT_VOL_MULT", 1.5),
-    "take_profit_pct":   _float("BREAKOUT_TP_PCT", 0.03),
-    "stop_loss_pct":     _float("BREAKOUT_SL_PCT", 0.015),
+    "ema_period":           _int("BREAKOUT_EMA_PERIOD", 100),
+    "ema_fast_period":      _int("BREAKOUT_EMA_FAST_PERIOD", 50),
+    "breakout_period":      _int("BREAKOUT_PERIOD", 25),
+    "volume_avg_period":    _int("BREAKOUT_VOL_AVG_PERIOD", 20),
+    "volume_multiplier":    _float("BREAKOUT_VOL_MULT", 1.7),
+    "candle_strength_min":  _float("BREAKOUT_CANDLE_STRENGTH", 0.003),
+    "take_profit_pct":      _float("BREAKOUT_TP_PCT", 0.035),
+    "stop_loss_pct":        _float("BREAKOUT_SL_PCT", 0.012),
+}
+
+PULLBACK_CONFIG = {
+    "ema_slow_period":   _int("PULLBACK_EMA_SLOW", 100),
+    "ema_fast_period":   _int("PULLBACK_EMA_FAST", 50),
+    "rsi_period":        _int("PULLBACK_RSI_PERIOD", 14),
+    "rsi_low":           _float("PULLBACK_RSI_LOW", 35.0),
+    "rsi_high":          _float("PULLBACK_RSI_HIGH", 50.0),
+    "ema_proximity_pct": _float("PULLBACK_EMA_PROXIMITY", 0.015),
+    "take_profit_pct":   _float("PULLBACK_TP_PCT", 0.03),
+    "stop_loss_pct":     _float("PULLBACK_SL_PCT", 0.015),
 }
 
 SCALPING_CONFIG = {

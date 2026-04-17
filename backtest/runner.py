@@ -26,6 +26,7 @@ from backtest.data_loader import DataLoader
 from backtest.multi_backtest import MultiBacktest
 from config.settings import (
     BREAKOUT_CONFIG,
+    PULLBACK_CONFIG,
     RISK_CONFIG,
     SCANNER_CONFIG,
     STRATEGY_CONFIG,
@@ -35,6 +36,7 @@ from config.settings import (
 from execution.simulator import ExecutionSimulator
 from storage.database import Database
 from strategy.breakout import MomentumBreakoutStrategy
+from strategy.pullback import TrendPullbackStrategy
 from strategy.swing import SwingStrategy
 
 logging.basicConfig(
@@ -54,7 +56,7 @@ BARS_PER_DAY = {"1h": 24, "4h": 6, "1d": 1, "5m": 288, "15m": 96}
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-symbol paper trading backtest")
-    p.add_argument("--strategy", choices=["swing", "scalp", "breakout"], default="swing")
+    p.add_argument("--strategy", choices=["swing", "scalp", "breakout", "pullback"], default="swing")
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--smoke", action="store_true", help="2 coin / 30 gün hızlı test")
     p.add_argument("--symbols", nargs="+", default=None, help="Coin listesi (default: UNIVERSE)")
@@ -86,6 +88,11 @@ def _make_strategy_factory(strategy: str):
             return MomentumBreakoutStrategy(config=BREAKOUT_CONFIG)
         return factory, "breakout_1h", TRADING_CONFIG["timeframe"]
 
+    if strategy == "pullback":
+        def factory():
+            return TrendPullbackStrategy(config=PULLBACK_CONFIG)
+        return factory, "pullback_1h", TRADING_CONFIG["timeframe"]
+
     raise ValueError(f"Bilinmeyen strateji: {strategy}")
 
 
@@ -107,6 +114,7 @@ def main() -> None:
     _tp_sl_map = {
         "swing":    (STRATEGY_CONFIG.get("take_profit_pct", 0.02), STRATEGY_CONFIG.get("stop_loss_pct", 0.01)),
         "breakout": (BREAKOUT_CONFIG["take_profit_pct"], BREAKOUT_CONFIG["stop_loss_pct"]),
+        "pullback": (PULLBACK_CONFIG["take_profit_pct"], PULLBACK_CONFIG["stop_loss_pct"]),
         "scalp":    (0.024, 0.012),
     }
     take_profit_pct, stop_loss_pct = _tp_sl_map.get(args.strategy, (0.02, 0.01))
