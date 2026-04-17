@@ -12,6 +12,11 @@ from strategy.signals import Signal
 
 logger = logging.getLogger(__name__)
 
+# Sembol auto-disable eşikleri
+_SYM_MIN_EVAL_TRADES = 3   # kaç trade sonra değerlendirme başlar
+_SYM_MIN_WIN_RATE    = 0.30  # bu WR altında devre dışı bırak
+# Net PnL < 0 ise de devre dışı (ayrıca kontrol edilir)
+
 
 @dataclass
 class SymbolSummary:
@@ -52,6 +57,7 @@ class MultiRunSummary:
     total_trade_count: int          # tüm round-trip'lerin toplamı
     max_concurrent_positions: int   # simülasyon boyunca gözlenen max
     scanner_stats: ScannerStats = field(default_factory=lambda: ScannerStats({}, {}, {}))
+    disabled_symbols: set[str] = field(default_factory=set)
 
 
 class MultiSymbolEngine:
@@ -98,6 +104,11 @@ class MultiSymbolEngine:
         self._partial_tp_done: dict[str, bool] = {}
         self._trailing_activated: dict[str, bool] = {}
         self._dynamic_sl: dict[str, float] = {}
+        # Per-symbol performance tracker (auto-disable)
+        self._sym_wins: dict[str, int] = {}
+        self._sym_losses: dict[str, int] = {}
+        self._sym_pnl: dict[str, float] = {}
+        self._sym_disabled: set[str] = set()
 
     def run(self) -> MultiRunSummary:
         if not self._symbol_strategies:
@@ -153,6 +164,11 @@ class MultiSymbolEngine:
                     symbol = opp.symbol
                     selection_counts[symbol] = selection_counts.get(symbol, 0) + 1
 
+                    # Auto-disable kontrolü
+                    if symbol in self._sym_disabled:
+                        logger.debug("SYM SKIP (disabled) | %s", symbol)
+                        continue
+
                     strategy, df = self._symbol_strategies[symbol]
                     df_slice = df.iloc[: i + 1]
                     bar = df_slice.iloc[-1]
@@ -182,7 +198,7 @@ class MultiSymbolEngine:
             opened_counts=opened_counts,
             veto_counts=veto_counts,
         )
-        return self._build_summary(trades, max_concurrent, scanner_stats)
+        return self._build_summary(trades, max_concurrent, scanner_stats, self._sym_disabled)
 
     # ── İşlem açma / kapama ───────────────────────────────────────────────────
 
@@ -250,6 +266,25 @@ class MultiSymbolEngine:
         self._dynamic_sl.pop(symbol, None)
         logger.info("CLOSE | bar=%d | %s | fill=%.4f | pnl=%.2f | reason=%s",
                     bar_index, symbol, fill_price, realized_pnl, exit_reason)
+
+        # Per-symbol tracker güncelle
+        if realized_pnl > 0:
+            self._sym_wins[symbol] = self._sym_wins.get(symbol, 0) + 1
+        else:
+            self._sym_losses[symbol] = self._sym_losses.get(symbol, 0) + 1
+        self._sym_pnl[symbol] = self._sym_pnl.get(symbol, 0.0) + realized_pnl
+
+        # Yeterli trade sonrası disable kontrolü
+        total = self._sym_wins.get(symbol, 0) + self._sym_losses.get(symbol, 0)
+        if total >= _SYM_MIN_EVAL_TRADES and symbol not in self._sym_disabled:
+            wr  = self._sym_wins.get(symbol, 0) / total
+            pnl = self._sym_pnl.get(symbol, 0.0)
+            if wr < _SYM_MIN_WIN_RATE or pnl < 0:
+                self._sym_disabled.add(symbol)
+                logger.info(
+                    "SYM DISABLED | %s | trades=%d | wr=%.1f%% | pnl=%.2f",
+                    symbol, total, wr * 100, pnl,
+                )
 
     # ── Yardımcılar ───────────────────────────────────────────────────────────
 
@@ -370,7 +405,7 @@ class MultiSymbolEngine:
         volume = float(df_slice["volume"].iloc[-1])
         return self._simulator.simulate_fill(side, price, atr, volume, qty).effective_price
 
-    def _build_summary(self, trades: list[Trade], max_concurrent: int, scanner_stats: ScannerStats | None = None) -> MultiRunSummary:
+    def _build_summary(self, trades: list[Trade], max_concurrent: int, scanner_stats: ScannerStats | None = None, disabled_symbols: set[str] | None = None) -> MultiRunSummary:
         # Per-symbol agregasyon
         per_symbol: dict[str, SymbolSummary] = {}
         for symbol in self._symbol_strategies:
@@ -395,4 +430,5 @@ class MultiSymbolEngine:
             total_trade_count=total_trades,
             max_concurrent_positions=max_concurrent,
             scanner_stats=scanner_stats or ScannerStats({}, {}, {}),
+            disabled_symbols=disabled_symbols or set(),
         )

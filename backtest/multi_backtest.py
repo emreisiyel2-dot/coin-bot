@@ -124,6 +124,25 @@ class BacktestResult:
         print()
         print(f"  En iyi  coin: {best}")
         print(f"  En kötü coin: {worst}")
+
+        # Sembol bazlı onay/ret analizi (backtest sonu snapshot)
+        approved, rejected = [], []
+        for row in self.per_symbol_table:
+            if row["trades"] == 0:
+                continue
+            if row["win_rate"] >= 30.0 and row["realized_pnl"] >= 0:
+                approved.append(row["symbol"])
+            else:
+                rejected.append(row["symbol"])
+
+        # Engine tarafından simülasyon sırasında devre dışı bırakılanlar
+        auto_disabled = self.summary.disabled_symbols
+
+        print()
+        print("  ── Sembol Değerlendirmesi (WR≥30% VE PnL≥0) ──")
+        print(f"  ONAYLANDI       : {', '.join(approved) if approved else '—'}")
+        print(f"  REDDEDİLDİ     : {', '.join(rejected) if rejected else '—'}")
+        print(f"  AUTO-DISABLED   : {', '.join(sorted(auto_disabled)) if auto_disabled else '—'}")
         print("═" * 62 + "\n")
 
 

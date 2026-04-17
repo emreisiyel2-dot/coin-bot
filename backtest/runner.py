@@ -76,10 +76,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--vol-multiplier",    type=float, default=None, help="Hacim çarpanı (örn: 2.0)")
     p.add_argument("--breakout-margin",   type=float, default=None, help="Breakout margin %'si (örn: 0.002)")
     p.add_argument("--adx-min",           type=float, default=None, help="ADX minimum eşiği (örn: 25)")
+    p.add_argument("--timeframe",         type=str,   default=None, help="Timeframe override (örn: 4h, 1h, 15m)")
     return p.parse_args()
 
 
-def _make_strategy_factory(strategy: str, entry_overrides: dict | None = None):
+def _make_strategy_factory(strategy: str, entry_overrides: dict | None = None, timeframe_override: str | None = None):
     if strategy == "swing":
         def factory():
             return SwingStrategy(config=STRATEGY_CONFIG)
@@ -108,9 +109,10 @@ def _make_strategy_factory(strategy: str, entry_overrides: dict | None = None):
 
     if strategy == "breakout_v2":
         cfg = {**BREAKOUT_V2_CONFIG, **(entry_overrides or {})}
+        tf = timeframe_override or TRADING_CONFIG["timeframe"]
         def factory():
             return MomentumBreakoutV2Strategy(config=cfg)
-        return factory, "breakout_v2_1h", TRADING_CONFIG["timeframe"]
+        return factory, f"breakout_v2_{tf}", tf
 
     raise ValueError(f"Bilinmeyen strateji: {strategy}")
 
@@ -134,7 +136,7 @@ def main() -> None:
     if args.breakout_margin is not None: entry_overrides["breakout_margin_pct"] = args.breakout_margin
     if args.adx_min         is not None: entry_overrides["adx_min"]            = args.adx_min
 
-    strategy_factory, strategy_name, timeframe = _make_strategy_factory(args.strategy, entry_overrides)
+    strategy_factory, strategy_name, timeframe = _make_strategy_factory(args.strategy, entry_overrides, args.timeframe)
 
     # TP/SL + partial exit her strateji için kendi config'inden gelir
     # (take_profit_pct, stop_loss_pct, partial_tp1_pct, partial_tp1_size, trailing_stop_pct, trailing_activate_pct)
