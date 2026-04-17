@@ -12,3 +12,5 @@ data_cache/*
 logs/*
 !data_cache/.gitkeep
 !logs/.gitkeep
+backtest.db
+xx
