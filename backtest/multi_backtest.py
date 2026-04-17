@@ -111,6 +111,8 @@ class MultiBacktest:
         strategy_name: str = "unknown",
         initial_cash: float = 10_000.0,
         position_size_pct: float = 0.10,
+        take_profit_pct: float = 0.02,
+        stop_loss_pct: float = 0.01,
         scanner_config: dict | None = None,
         risk_config: dict | None = None,
         simulator=None,
@@ -120,6 +122,8 @@ class MultiBacktest:
         self._strategy_name = strategy_name
         self._initial_cash = initial_cash
         self._position_size_pct = position_size_pct
+        self._take_profit_pct = take_profit_pct
+        self._stop_loss_pct = stop_loss_pct
         self._scanner_config = scanner_config or {}
         self._risk_config = risk_config or {}
         self._simulator = simulator
@@ -148,6 +152,8 @@ class MultiBacktest:
             risk_manager=risk_manager,
             scanner=scanner,
             position_size_pct=self._position_size_pct,
+            take_profit_pct=self._take_profit_pct,
+            stop_loss_pct=self._stop_loss_pct,
             simulator=self._simulator,
         )
 

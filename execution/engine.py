@@ -56,6 +56,8 @@ class PaperEngine:
         portfolio: Portfolio,
         symbol: str,
         position_size_pct: float = 0.15,
+        take_profit_pct: float = 0.02,
+        stop_loss_pct: float = 0.01,
         simulator: ExecutionSimulator | None = None,
         risk_manager: RiskManager | None = None,
     ) -> None:
@@ -63,6 +65,8 @@ class PaperEngine:
         self._portfolio = portfolio
         self._symbol = symbol
         self._position_size_pct = position_size_pct
+        self._take_profit_pct = take_profit_pct
+        self._stop_loss_pct = stop_loss_pct
         self._simulator = simulator
         self._risk_manager = risk_manager
 
@@ -78,6 +82,9 @@ class PaperEngine:
 
             # Unrealized PnL'i güncel fiyata çek
             self._portfolio.update_price(self._symbol, current_price)
+
+            # TP/SL kontrolü — açık pozisyon varsa önce fiyat bazlı çıkışa bak
+            self._check_tp_sl(current_price, current_ts, i, trades, df_slice)
 
             # Strategy sinyali al; yetersiz veri → skip
             try:
@@ -184,6 +191,31 @@ class PaperEngine:
         )
 
     # ── Yardımcılar ───────────────────────────────────────────────────────────
+
+    def _check_tp_sl(
+        self,
+        price: float,
+        ts: pd.Timestamp,
+        bar_index: int,
+        trades: list[Trade],
+        df_slice: pd.DataFrame | None = None,
+    ) -> None:
+        if self._symbol not in self._portfolio.positions:
+            return
+        pos = self._portfolio.positions[self._symbol]
+        entry = pos.entry_price
+        if price >= entry * (1 + self._take_profit_pct):
+            logger.info(
+                "TP HIT | bar=%d | %s | entry=%.2f | current=%.2f | +%.1f%%",
+                bar_index, self._symbol, entry, price, self._take_profit_pct * 100,
+            )
+            self._handle_sell(price, ts, bar_index, trades, df_slice)
+        elif price <= entry * (1 - self._stop_loss_pct):
+            logger.info(
+                "SL HIT | bar=%d | %s | entry=%.2f | current=%.2f | -%.1f%%",
+                bar_index, self._symbol, entry, price, self._stop_loss_pct * 100,
+            )
+            self._handle_sell(price, ts, bar_index, trades, df_slice)
 
     def _fill_price(
         self,

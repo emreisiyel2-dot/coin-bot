@@ -74,6 +74,8 @@ class MultiSymbolEngine:
         risk_manager: RiskManager,
         scanner: OpportunityScanner,
         position_size_pct: float = 0.10,
+        take_profit_pct: float = 0.02,
+        stop_loss_pct: float = 0.01,
         simulator=None,
     ) -> None:
         self._symbol_strategies = symbol_strategies
@@ -81,6 +83,8 @@ class MultiSymbolEngine:
         self._risk_manager = risk_manager
         self._scanner = scanner
         self._position_size_pct = position_size_pct
+        self._take_profit_pct = take_profit_pct
+        self._stop_loss_pct = stop_loss_pct
         self._simulator = simulator
 
     def run(self) -> MultiRunSummary:
@@ -102,13 +106,19 @@ class MultiSymbolEngine:
                 bar = df.iloc[i]
                 self._portfolio.update_price(symbol, float(bar["close"]))
 
-            # 1. SELL sinyali kontrol — açık pozisyonları kapat
+            # 1. TP/SL + SELL sinyali kontrol — açık pozisyonları kapat
             for symbol in list(self._portfolio.positions.keys()):
                 if symbol not in self._symbol_strategies:
                     continue
                 strategy, df = self._symbol_strategies[symbol]
                 df_slice = df.iloc[: i + 1]
                 bar_ts = df_slice.iloc[-1]["timestamp"]
+                price = float(df_slice.iloc[-1]["close"])
+
+                # Fiyat bazlı çıkış önce kontrol edilir
+                if self._tp_sl_triggered(symbol, price, df_slice, i, bar_ts, trades):
+                    continue
+
                 try:
                     signal = strategy.generate_signal(df_slice)
                 except ValueError:
@@ -220,6 +230,35 @@ class MultiSymbolEngine:
         logger.info("CLOSE | bar=%d | %s | fill=%.4f | pnl=%.2f", bar_index, symbol, fill_price, realized_pnl)
 
     # ── Yardımcılar ───────────────────────────────────────────────────────────
+
+    def _tp_sl_triggered(
+        self,
+        symbol: str,
+        price: float,
+        df_slice: pd.DataFrame,
+        bar_index: int,
+        bar_ts: pd.Timestamp,
+        trades: list[Trade],
+    ) -> bool:
+        pos = self._portfolio.positions.get(symbol)
+        if pos is None:
+            return False
+        entry = pos.entry_price
+        if price >= entry * (1 + self._take_profit_pct):
+            logger.info(
+                "TP HIT | bar=%d | %s | entry=%.4f | current=%.4f | +%.1f%%",
+                bar_index, symbol, entry, price, self._take_profit_pct * 100,
+            )
+            self._close_position(symbol, df_slice, bar_index, bar_ts, trades)
+            return True
+        if price <= entry * (1 - self._stop_loss_pct):
+            logger.info(
+                "SL HIT | bar=%d | %s | entry=%.4f | current=%.4f | -%.1f%%",
+                bar_index, symbol, entry, price, self._stop_loss_pct * 100,
+            )
+            self._close_position(symbol, df_slice, bar_index, bar_ts, trades)
+            return True
+        return False
 
     def _compute_quantity(self, price: float) -> float:
         target = self._portfolio.total_equity * self._position_size_pct

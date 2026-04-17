@@ -25,6 +25,7 @@ import pandas as pd
 from backtest.data_loader import DataLoader
 from backtest.multi_backtest import MultiBacktest
 from config.settings import (
+    BREAKOUT_CONFIG,
     RISK_CONFIG,
     SCANNER_CONFIG,
     STRATEGY_CONFIG,
@@ -33,6 +34,7 @@ from config.settings import (
 )
 from execution.simulator import ExecutionSimulator
 from storage.database import Database
+from strategy.breakout import MomentumBreakoutStrategy
 from strategy.swing import SwingStrategy
 
 logging.basicConfig(
@@ -52,7 +54,7 @@ BARS_PER_DAY = {"1h": 24, "4h": 6, "1d": 1, "5m": 288, "15m": 96}
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-symbol paper trading backtest")
-    p.add_argument("--strategy", choices=["swing", "scalp"], default="swing")
+    p.add_argument("--strategy", choices=["swing", "scalp", "breakout"], default="swing")
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--smoke", action="store_true", help="2 coin / 30 gün hızlı test")
     p.add_argument("--symbols", nargs="+", default=None, help="Coin listesi (default: UNIVERSE)")
@@ -69,7 +71,6 @@ def _make_strategy_factory(strategy: str):
         return factory, "swing_1h", TRADING_CONFIG["timeframe"]
 
     if strategy == "scalp":
-        # Scalp için import burada — modül hazır olduğunda
         try:
             from strategy.scalp import ScalpStrategy
             from config.settings import SCALPING_CONFIG as SC
@@ -79,6 +80,11 @@ def _make_strategy_factory(strategy: str):
         except ImportError:
             logger.error("ScalpStrategy henüz implement edilmedi. Swing kullanılıyor.")
             return _make_strategy_factory("swing")
+
+    if strategy == "breakout":
+        def factory():
+            return MomentumBreakoutStrategy(config=BREAKOUT_CONFIG)
+        return factory, "breakout_1h", TRADING_CONFIG["timeframe"]
 
     raise ValueError(f"Bilinmeyen strateji: {strategy}")
 
@@ -96,6 +102,14 @@ def main() -> None:
         days = args.days
 
     strategy_factory, strategy_name, timeframe = _make_strategy_factory(args.strategy)
+
+    # TP/SL her strateji için kendi config'inden gelir
+    _tp_sl_map = {
+        "swing":    (STRATEGY_CONFIG.get("take_profit_pct", 0.02), STRATEGY_CONFIG.get("stop_loss_pct", 0.01)),
+        "breakout": (BREAKOUT_CONFIG["take_profit_pct"], BREAKOUT_CONFIG["stop_loss_pct"]),
+        "scalp":    (0.024, 0.012),
+    }
+    take_profit_pct, stop_loss_pct = _tp_sl_map.get(args.strategy, (0.02, 0.01))
 
     until_dt = datetime.now(timezone.utc)
     since_dt = until_dt - timedelta(days=days)
@@ -136,6 +150,8 @@ def main() -> None:
         strategy_name=strategy_name,
         initial_cash=args.cash,
         position_size_pct=0.10,
+        take_profit_pct=take_profit_pct,
+        stop_loss_pct=stop_loss_pct,
         scanner_config=SCANNER_CONFIG,
         risk_config=RISK_CONFIG,
         simulator=simulator,

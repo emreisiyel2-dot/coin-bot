@@ -21,23 +21,23 @@ def _float(key: str, default: float) -> float:
 
 
 TRADING_CONFIG = {
-    "symbols": [s.strip() for s in os.getenv("SYMBOLS", "BTC/USDT,ETH/USDT,BNB/USDT").split(",")],
+    "symbols": [s.strip() for s in os.getenv("SYMBOLS", "BTC/USDT").split(",")],
     "timeframe": os.getenv("TIMEFRAME", "1h"),
     "initial_balance_usdt": _float("INITIAL_BALANCE_USDT", 300.0),
 }
 
 STRATEGY_CONFIG = {
-    "ema_period":              _int("EMA_PERIOD", 200),
+    "ema_period":              _int("EMA_PERIOD", 100),
     "rsi_period":              _int("RSI_PERIOD", 14),
-    "rsi_oversold":            _float("RSI_OVERSOLD", 35.0),
-    "rsi_midline":             _float("RSI_MIDLINE", 60.0),
+    "rsi_oversold":            _float("RSI_OVERSOLD", 40.0),
+    "rsi_midline":             _float("RSI_MIDLINE", 55.0),
     "cooldown_bars":           _int("COOLDOWN_BARS", 5),
     "max_open_positions":      _int("MAX_OPEN_POSITIONS", 2),
     "max_positions_per_symbol": _int("MAX_POSITIONS_PER_SYMBOL", 1),
     "max_trades_per_hour":     _int("MAX_TRADES_PER_HOUR", 3),
     "position_size_pct":       _float("POSITION_SIZE_PCT", 0.15),
-    "stop_loss_pct":           _float("STOP_LOSS_PCT", 0.025),
-    "take_profit_pct":         _float("TAKE_PROFIT_PCT", 0.04),
+    "stop_loss_pct":           _float("STOP_LOSS_PCT", 0.01),
+    "take_profit_pct":         _float("TAKE_PROFIT_PCT", 0.02),
     "commission_pct":          _float("COMMISSION_PCT", 0.001),
     "slippage_pct":            _float("SLIPPAGE_PCT", 0.0005),
 }
@@ -51,12 +51,12 @@ RISK_CONFIG = {
 
 UNIVERSE_SYMBOLS = [s.strip() for s in os.getenv(
     "UNIVERSE_SYMBOLS",
-    "BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT,XRP/USDT,AVAX/USDT,ADA/USDT,DOGE/USDT",
+    "BTC/USDT",
 ).split(",")]
 
 SCANNER_CONFIG = {
     # Filtreler
-    "min_atr_pct":              _float("SCAN_MIN_ATR_PCT", 0.005),   # fiyatın %0.5'i
+    "min_atr_pct":              _float("SCAN_MIN_ATR_PCT", 0.002),   # fiyatın %0.2'si
     "min_volume":               _float("SCAN_MIN_VOLUME", 1_000_000.0),  # absolute USDT
     "volume_window":            _int("SCAN_VOLUME_WINDOW", 20),       # rolling avg penceresi
     "spread_penalty_threshold": _float("SCAN_SPREAD_PENALTY", 0.002), # %0.2 üstü ceza
@@ -66,6 +66,15 @@ SCANNER_CONFIG = {
     "volume_weight":            _float("SCAN_VOL_WEIGHT", 0.20),
     # Seçim
     "top_n":                    _int("SCAN_TOP_N", 3),
+}
+
+BREAKOUT_CONFIG = {
+    "ema_period":        _int("BREAKOUT_EMA_PERIOD", 100),
+    "breakout_period":   _int("BREAKOUT_PERIOD", 20),
+    "volume_avg_period": _int("BREAKOUT_VOL_AVG_PERIOD", 20),
+    "volume_multiplier": _float("BREAKOUT_VOL_MULT", 1.5),
+    "take_profit_pct":   _float("BREAKOUT_TP_PCT", 0.03),
+    "stop_loss_pct":     _float("BREAKOUT_SL_PCT", 0.015),
 }
 
 SCALPING_CONFIG = {
