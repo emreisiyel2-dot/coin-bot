@@ -65,10 +65,21 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--cash", type=float, default=10_000.0)
     p.add_argument("--db", default="backtest.db", help="SQLite dosyası")
     p.add_argument("--no-db", action="store_true", help="DB'ye yazma")
+    # Exit parametre override'ları (config değerlerini ezer)
+    p.add_argument("--take-profit",       type=float, default=None, help="TP yüzdesi (örn: 0.03)")
+    p.add_argument("--stop-loss",         type=float, default=None, help="SL yüzdesi (örn: 0.01)")
+    p.add_argument("--partial-tp",        type=float, default=None, help="Partial TP1 yüzdesi (0.0 = kapalı)")
+    p.add_argument("--trailing-activate", type=float, default=None, help="Trailing aktivasyon eşiği (örn: 0.015)")
+    p.add_argument("--trailing-stop",     type=float, default=None, help="Trailing stop mesafesi (örn: 0.01)")
+    # Entry parametre override'ları (sadece breakout_v2)
+    p.add_argument("--rsi-min",           type=float, default=None, help="RSI minimum eşiği (örn: 60)")
+    p.add_argument("--vol-multiplier",    type=float, default=None, help="Hacim çarpanı (örn: 2.0)")
+    p.add_argument("--breakout-margin",   type=float, default=None, help="Breakout margin %'si (örn: 0.002)")
+    p.add_argument("--adx-min",           type=float, default=None, help="ADX minimum eşiği (örn: 25)")
     return p.parse_args()
 
 
-def _make_strategy_factory(strategy: str):
+def _make_strategy_factory(strategy: str, entry_overrides: dict | None = None):
     if strategy == "swing":
         def factory():
             return SwingStrategy(config=STRATEGY_CONFIG)
@@ -96,8 +107,9 @@ def _make_strategy_factory(strategy: str):
         return factory, "pullback_1h", TRADING_CONFIG["timeframe"]
 
     if strategy == "breakout_v2":
+        cfg = {**BREAKOUT_V2_CONFIG, **(entry_overrides or {})}
         def factory():
-            return MomentumBreakoutV2Strategy(config=BREAKOUT_V2_CONFIG)
+            return MomentumBreakoutV2Strategy(config=cfg)
         return factory, "breakout_v2_1h", TRADING_CONFIG["timeframe"]
 
     raise ValueError(f"Bilinmeyen strateji: {strategy}")
@@ -115,18 +127,27 @@ def main() -> None:
         symbols = args.symbols or UNIVERSE_SYMBOLS
         days = args.days
 
-    strategy_factory, strategy_name, timeframe = _make_strategy_factory(args.strategy)
+    # Entry override'ları (breakout_v2 için)
+    entry_overrides: dict = {}
+    if args.rsi_min         is not None: entry_overrides["rsi_min"]            = args.rsi_min
+    if args.vol_multiplier  is not None: entry_overrides["vol_multiplier"]     = args.vol_multiplier
+    if args.breakout_margin is not None: entry_overrides["breakout_margin_pct"] = args.breakout_margin
+    if args.adx_min         is not None: entry_overrides["adx_min"]            = args.adx_min
+
+    strategy_factory, strategy_name, timeframe = _make_strategy_factory(args.strategy, entry_overrides)
 
     # TP/SL + partial exit her strateji için kendi config'inden gelir
+    # (take_profit_pct, stop_loss_pct, partial_tp1_pct, partial_tp1_size, trailing_stop_pct, trailing_activate_pct)
     _exit_map = {
-        "swing":    (STRATEGY_CONFIG.get("take_profit_pct", 0.02), STRATEGY_CONFIG.get("stop_loss_pct", 0.01), 0.0, 0.5, 0.0),
-        "breakout": (BREAKOUT_CONFIG["take_profit_pct"], BREAKOUT_CONFIG["stop_loss_pct"], 0.0, 0.5, 0.0),
+        "swing":    (STRATEGY_CONFIG.get("take_profit_pct", 0.02), STRATEGY_CONFIG.get("stop_loss_pct", 0.01), 0.0, 0.5, 0.0, 0.0),
+        "breakout": (BREAKOUT_CONFIG["take_profit_pct"], BREAKOUT_CONFIG["stop_loss_pct"], 0.0, 0.5, 0.0, 0.0),
         "pullback": (
             PULLBACK_CONFIG["take_profit_pct"],
             PULLBACK_CONFIG["stop_loss_pct"],
             PULLBACK_CONFIG["partial_tp1_pct"],
             PULLBACK_CONFIG["partial_tp1_size"],
             PULLBACK_CONFIG["trailing_stop_pct"],
+            0.0,
         ),
         "breakout_v2": (
             BREAKOUT_V2_CONFIG["take_profit_pct"],
@@ -134,11 +155,19 @@ def main() -> None:
             BREAKOUT_V2_CONFIG["partial_tp1_pct"],
             BREAKOUT_V2_CONFIG["partial_tp1_size"],
             BREAKOUT_V2_CONFIG["trailing_stop_pct"],
+            BREAKOUT_V2_CONFIG["trailing_activate_pct"],
         ),
-        "scalp":    (0.024, 0.012, 0.0, 0.5, 0.0),
+        "scalp":    (0.024, 0.012, 0.0, 0.5, 0.0, 0.0),
     }
-    take_profit_pct, stop_loss_pct, partial_tp1_pct, partial_tp1_size, trailing_stop_pct = \
-        _exit_map.get(args.strategy, (0.02, 0.01, 0.0, 0.5, 0.0))
+    take_profit_pct, stop_loss_pct, partial_tp1_pct, partial_tp1_size, trailing_stop_pct, trailing_activate_pct = \
+        _exit_map.get(args.strategy, (0.02, 0.01, 0.0, 0.5, 0.0, 0.0))
+
+    # CLI override'ları uygula
+    if args.take_profit       is not None: take_profit_pct      = args.take_profit
+    if args.stop_loss         is not None: stop_loss_pct        = args.stop_loss
+    if args.partial_tp        is not None: partial_tp1_pct      = args.partial_tp
+    if args.trailing_activate is not None: trailing_activate_pct = args.trailing_activate
+    if args.trailing_stop     is not None: trailing_stop_pct    = args.trailing_stop
 
     until_dt = datetime.now(timezone.utc)
     since_dt = until_dt - timedelta(days=days)
@@ -184,6 +213,7 @@ def main() -> None:
         partial_tp1_pct=partial_tp1_pct,
         partial_tp1_size=partial_tp1_size,
         trailing_stop_pct=trailing_stop_pct,
+        trailing_activate_pct=trailing_activate_pct,
         scanner_config=SCANNER_CONFIG,
         risk_config=RISK_CONFIG,
         simulator=simulator,

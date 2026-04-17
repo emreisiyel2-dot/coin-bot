@@ -63,7 +63,6 @@ class BacktestResult:
         return t[-1]["symbol"] if t else None
 
     def print_summary(self) -> None:
-        # Reporting metrikleri (profit_factor, drawdown)
         close_trades = [t for t in self.summary.trades if t.action == "CLOSE"]
         trade_dicts = [
             {"pnl": t.realized_pnl, "symbol": t.symbol,
@@ -71,6 +70,20 @@ class BacktestResult:
             for t in close_trades
         ]
         m = compute_metrics(trade_dicts, self.initial_cash)
+
+        pnls = [t.realized_pnl for t in close_trades if t.realized_pnl is not None]
+        wins  = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        avg_win  = sum(wins) / len(wins) if wins else 0.0
+        avg_loss = sum(losses) / len(losses) if losses else 0.0
+        wr = m.win_rate
+        expectancy = wr * avg_win + (1 - wr) * avg_loss
+
+        # Exit reason dökümü
+        reasons: dict[str, int] = {}
+        for t in close_trades:
+            r = t.exit_reason or "UNKNOWN"
+            reasons[r] = reasons.get(r, 0) + 1
 
         pf = f"{m.profit_factor:.2f}" if m.profit_factor != float("inf") else "∞"
         print("\n" + "═" * 62)
@@ -80,11 +93,21 @@ class BacktestResult:
         print(f"  Başlangıç      : {self.initial_cash:,.2f} USDT")
         print(f"  Final equity   : {self.summary.final_equity:,.2f} USDT")
         print(f"  Toplam getiri  : {self.total_return_pct:+.2f}%")
+        print(f"  Net PnL        : {m.total_pnl:+.2f} USDT")
         print(f"  Trade sayısı   : {self.summary.total_trade_count}")
         print(f"  Win rate       : {m.win_rate * 100:.1f}%")
         print(f"  Profit factor  : {pf}")
         print(f"  Max drawdown   : {m.max_drawdown:+.2f} USDT")
         print(f"  Max eş zamanlı : {self.summary.max_concurrent_positions}")
+        print()
+        print(f"  Avg win        : {avg_win:+.2f} USDT")
+        print(f"  Avg loss       : {avg_loss:+.2f} USDT")
+        print(f"  Expectancy     : {expectancy:+.2f} USDT/trade")
+        print()
+        print(f"  Exit dökümü    :", end="")
+        for r, cnt in sorted(reasons.items()):
+            print(f"  {r}={cnt}", end="")
+        print()
         print()
         print(f"  Scanner dönüşüm oranı: {self.summary.scanner_stats.total_conversion_rate() * 100:.1f}%")
         print()
@@ -116,6 +139,7 @@ class MultiBacktest:
         partial_tp1_pct: float = 0.0,
         partial_tp1_size: float = 0.5,
         trailing_stop_pct: float = 0.0,
+        trailing_activate_pct: float = 0.0,
         scanner_config: dict | None = None,
         risk_config: dict | None = None,
         simulator=None,
@@ -130,6 +154,7 @@ class MultiBacktest:
         self._partial_tp1_pct = partial_tp1_pct
         self._partial_tp1_size = partial_tp1_size
         self._trailing_stop_pct = trailing_stop_pct
+        self._trailing_activate_pct = trailing_activate_pct
         self._scanner_config = scanner_config or {}
         self._risk_config = risk_config or {}
         self._simulator = simulator
@@ -163,6 +188,7 @@ class MultiBacktest:
             partial_tp1_pct=self._partial_tp1_pct,
             partial_tp1_size=self._partial_tp1_size,
             trailing_stop_pct=self._trailing_stop_pct,
+            trailing_activate_pct=self._trailing_activate_pct,
             simulator=self._simulator,
         )
 

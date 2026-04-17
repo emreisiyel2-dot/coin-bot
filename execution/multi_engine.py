@@ -79,6 +79,7 @@ class MultiSymbolEngine:
         partial_tp1_pct: float = 0.0,
         partial_tp1_size: float = 0.5,
         trailing_stop_pct: float = 0.0,
+        trailing_activate_pct: float = 0.0,
         simulator=None,
     ) -> None:
         self._symbol_strategies = symbol_strategies
@@ -91,9 +92,11 @@ class MultiSymbolEngine:
         self._partial_tp1_pct = partial_tp1_pct
         self._partial_tp1_size = partial_tp1_size
         self._trailing_stop_pct = trailing_stop_pct
+        self._trailing_activate_pct = trailing_activate_pct
         self._simulator = simulator
         # Per-symbol exit state
         self._partial_tp_done: dict[str, bool] = {}
+        self._trailing_activated: dict[str, bool] = {}
         self._dynamic_sl: dict[str, float] = {}
 
     def run(self) -> MultiRunSummary:
@@ -210,6 +213,7 @@ class MultiSymbolEngine:
         ))
         # Exit state başlat
         self._partial_tp_done[symbol] = False
+        self._trailing_activated[symbol] = False
         self._dynamic_sl[symbol] = fill_price * (1 - self._stop_loss_pct)
         logger.info("OPEN | bar=%d | %s | fill=%.4f | qty=%.6f", bar_index, symbol, fill_price, qty)
 
@@ -220,6 +224,7 @@ class MultiSymbolEngine:
         bar_index: int,
         bar_ts: pd.Timestamp,
         trades: list[Trade],
+        exit_reason: str = "SIGNAL",
     ) -> None:
         pos = self._portfolio.positions.get(symbol)
         if pos is None:
@@ -238,10 +243,13 @@ class MultiSymbolEngine:
             price=fill_price, quantity=pos.quantity,
             bar_index=bar_index, timestamp=bar_ts,
             realized_pnl=realized_pnl,
+            exit_reason=exit_reason,
         ))
         self._partial_tp_done.pop(symbol, None)
+        self._trailing_activated.pop(symbol, None)
         self._dynamic_sl.pop(symbol, None)
-        logger.info("CLOSE | bar=%d | %s | fill=%.4f | pnl=%.2f", bar_index, symbol, fill_price, realized_pnl)
+        logger.info("CLOSE | bar=%d | %s | fill=%.4f | pnl=%.2f | reason=%s",
+                    bar_index, symbol, fill_price, realized_pnl, exit_reason)
 
     # ── Yardımcılar ───────────────────────────────────────────────────────────
 
@@ -281,21 +289,38 @@ class MultiSymbolEngine:
                 return False
 
         # ── Trailing stop güncelle ────────────────────────────────────────────
-        if self._trailing_stop_pct > 0 and self._partial_tp_done.get(symbol, False):
-            new_sl = price * (1 - self._trailing_stop_pct)
-            self._dynamic_sl[symbol] = max(self._dynamic_sl.get(symbol, 0.0), new_sl)
+        if self._trailing_stop_pct > 0:
+            if self._trailing_activate_pct > 0:
+                # Kâr eşiğine ulaşınca aktif ol
+                if not self._trailing_activated.get(symbol, False):
+                    if price >= entry * (1 + self._trailing_activate_pct):
+                        self._trailing_activated[symbol] = True
+                        logger.info(
+                            "TRAILING AKTIF | bar=%d | %s | price=%.4f | +%.1f%% kâr eşiği",
+                            bar_index, symbol, price, self._trailing_activate_pct * 100,
+                        )
+                if self._trailing_activated.get(symbol, False):
+                    new_sl = price * (1 - self._trailing_stop_pct)
+                    self._dynamic_sl[symbol] = max(self._dynamic_sl.get(symbol, 0.0), new_sl)
+            elif self._partial_tp_done.get(symbol, False):
+                # Eski mantık: partial TP sonrası aktif ol
+                new_sl = price * (1 - self._trailing_stop_pct)
+                self._dynamic_sl[symbol] = max(self._dynamic_sl.get(symbol, 0.0), new_sl)
 
         # ── Full TP ───────────────────────────────────────────────────────────
         if price >= entry * (1 + self._take_profit_pct):
             logger.info("TP HIT | bar=%d | %s | entry=%.4f | price=%.4f", bar_index, symbol, entry, price)
-            self._close_position(symbol, df_slice, bar_index, bar_ts, trades)
+            self._close_position(symbol, df_slice, bar_index, bar_ts, trades, exit_reason="TP")
             return True
 
         # ── SL (dinamik) ──────────────────────────────────────────────────────
         current_sl = self._dynamic_sl.get(symbol, entry * (1 - self._stop_loss_pct))
         if price <= current_sl:
-            logger.info("SL HIT | bar=%d | %s | price=%.4f | sl=%.4f", bar_index, symbol, price, current_sl)
-            self._close_position(symbol, df_slice, bar_index, bar_ts, trades)
+            static_sl = entry * (1 - self._stop_loss_pct)
+            reason = "TRAILING" if self._trailing_activated.get(symbol, False) and current_sl > static_sl else "SL"
+            logger.info("SL HIT | bar=%d | %s | price=%.4f | sl=%.4f | reason=%s",
+                        bar_index, symbol, price, current_sl, reason)
+            self._close_position(symbol, df_slice, bar_index, bar_ts, trades, exit_reason=reason)
             return True
 
         return False

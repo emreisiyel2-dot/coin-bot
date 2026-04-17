@@ -80,18 +80,23 @@ BREAKOUT_CONFIG = {
 }
 
 BREAKOUT_V2_CONFIG = {
-    "ema_slow_period": _int("BV2_EMA_SLOW", 100),
-    "ema_fast_period": _int("BV2_EMA_FAST", 50),
-    "rsi_period":      _int("BV2_RSI_PERIOD", 14),
-    "rsi_min":         _float("BV2_RSI_MIN", 55.0),
-    "breakout_period": _int("BV2_BREAKOUT_PERIOD", 20),
-    "vol_avg_period":  _int("BV2_VOL_AVG_PERIOD", 20),
-    "vol_multiplier":  _float("BV2_VOL_MULT", 1.5),
-    "take_profit_pct": _float("BV2_TP_PCT", 0.02),
-    "stop_loss_pct":   _float("BV2_SL_PCT", 0.01),
-    "partial_tp1_pct": _float("BV2_PARTIAL_TP1_PCT", 0.01),
-    "partial_tp1_size":_float("BV2_PARTIAL_TP1_SIZE", 0.5),
-    "trailing_stop_pct":_float("BV2_TRAILING_STOP", 0.005),
+    "ema_slow_period":       _int("BV2_EMA_SLOW", 100),
+    "ema_fast_period":       _int("BV2_EMA_FAST", 50),
+    "rsi_period":            _int("BV2_RSI_PERIOD", 14),
+    "rsi_min":               _float("BV2_RSI_MIN", 55.0),
+    "breakout_period":       _int("BV2_BREAKOUT_PERIOD", 20),
+    "vol_avg_period":        _int("BV2_VOL_AVG_PERIOD", 20),
+    "vol_multiplier":        _float("BV2_VOL_MULT", 1.5),
+    "take_profit_pct":       _float("BV2_TP_PCT", 0.03),
+    "stop_loss_pct":         _float("BV2_SL_PCT", 0.01),
+    "partial_tp1_pct":       _float("BV2_PARTIAL_TP1_PCT", 0.0),
+    "partial_tp1_size":      _float("BV2_PARTIAL_TP1_SIZE", 0.5),
+    "trailing_stop_pct":     _float("BV2_TRAILING_STOP", 0.01),
+    "trailing_activate_pct": _float("BV2_TRAILING_ACTIVATE", 0.015),
+    "breakout_margin_pct":   _float("BV2_BREAKOUT_MARGIN", 0.0),
+    "ema_regime_period":     _int("BV2_EMA_REGIME", 200),
+    "adx_period":            _int("BV2_ADX_PERIOD", 14),
+    "adx_min":               _float("BV2_ADX_MIN", 25.0),
 }
 
 PULLBACK_CONFIG = {

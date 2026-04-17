@@ -23,6 +23,7 @@ class Trade:
     bar_index: int
     timestamp: pd.Timestamp
     realized_pnl: float | None = None  # sadece CLOSE trade'de dolu
+    exit_reason: str | None = None     # "TP" | "SL" | "TRAILING" | "SIGNAL"
 
 
 @dataclass
