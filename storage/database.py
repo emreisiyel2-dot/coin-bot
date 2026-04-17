@@ -108,9 +108,18 @@ class Database:
             (:run_id, :symbol, :side, :entry_price, :exit_price,
              :quantity, :pnl, :opened_at, :closed_at, :strategy_name);
         """
+        valid_rows = []
+        for r in rows:
+            if r.get("entry_price") is None:
+                logger.warning(
+                    "save_trades: entry_price eksik — satır skip edildi | symbol=%s closed_at=%s",
+                    r.get("symbol"), r.get("closed_at"),
+                )
+                continue
+            valid_rows.append(r)
         with self._conn:
-            self._conn.executemany(sql, rows)
-        logger.info("save_trades | %d satır eklendi", len(rows))
+            self._conn.executemany(sql, valid_rows)
+        logger.info("save_trades | %d satır eklendi (%d skip)", len(valid_rows), len(rows) - len(valid_rows))
 
     def fetch_trades(self, run_id: str | None = None) -> list[dict]:
         if run_id is not None:
@@ -152,7 +161,9 @@ def build_trade_rows(
         if t.action == "OPEN":
             pending[t.symbol] = t
         elif t.action == "CLOSE":
-            open_t = pending.pop(t.symbol, None)
+            # pop değil get — partial close sonra da OPEN referansı korunur
+            # bir sonraki OPEN geldiğinde pending[symbol] otomatik ezilir
+            open_t = pending.get(t.symbol)
             rows.append({
                 "run_id":        run_id,
                 "symbol":        t.symbol,

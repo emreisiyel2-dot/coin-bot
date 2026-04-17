@@ -79,15 +79,34 @@ BREAKOUT_CONFIG = {
     "stop_loss_pct":        _float("BREAKOUT_SL_PCT", 0.012),
 }
 
+BREAKOUT_V2_CONFIG = {
+    "ema_slow_period": _int("BV2_EMA_SLOW", 100),
+    "ema_fast_period": _int("BV2_EMA_FAST", 50),
+    "rsi_period":      _int("BV2_RSI_PERIOD", 14),
+    "rsi_min":         _float("BV2_RSI_MIN", 55.0),
+    "breakout_period": _int("BV2_BREAKOUT_PERIOD", 20),
+    "vol_avg_period":  _int("BV2_VOL_AVG_PERIOD", 20),
+    "vol_multiplier":  _float("BV2_VOL_MULT", 1.5),
+    "take_profit_pct": _float("BV2_TP_PCT", 0.02),
+    "stop_loss_pct":   _float("BV2_SL_PCT", 0.01),
+    "partial_tp1_pct": _float("BV2_PARTIAL_TP1_PCT", 0.01),
+    "partial_tp1_size":_float("BV2_PARTIAL_TP1_SIZE", 0.5),
+    "trailing_stop_pct":_float("BV2_TRAILING_STOP", 0.005),
+}
+
 PULLBACK_CONFIG = {
     "ema_slow_period":   _int("PULLBACK_EMA_SLOW", 100),
     "ema_fast_period":   _int("PULLBACK_EMA_FAST", 50),
     "rsi_period":        _int("PULLBACK_RSI_PERIOD", 14),
-    "rsi_low":           _float("PULLBACK_RSI_LOW", 35.0),
-    "rsi_high":          _float("PULLBACK_RSI_HIGH", 50.0),
-    "ema_proximity_pct": _float("PULLBACK_EMA_PROXIMITY", 0.015),
-    "take_profit_pct":   _float("PULLBACK_TP_PCT", 0.03),
+    "rsi_low":              _float("PULLBACK_RSI_LOW", 45.0),
+    "rsi_high":             _float("PULLBACK_RSI_HIGH", 55.0),
+    "ema_proximity_pct":    _float("PULLBACK_EMA_PROXIMITY", 0.01),
+    "trend_strength_min":   _float("PULLBACK_TREND_STRENGTH", 0.01),
+    "take_profit_pct":   _float("PULLBACK_TP_PCT", 0.02),
     "stop_loss_pct":     _float("PULLBACK_SL_PCT", 0.015),
+    "partial_tp1_pct":   _float("PULLBACK_PARTIAL_TP1_PCT", 0.01),
+    "partial_tp1_size":  _float("PULLBACK_PARTIAL_TP1_SIZE", 0.5),
+    "trailing_stop_pct": _float("PULLBACK_TRAILING_STOP", 0.01),
 }
 
 SCALPING_CONFIG = {

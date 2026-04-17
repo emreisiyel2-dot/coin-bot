@@ -26,6 +26,7 @@ from backtest.data_loader import DataLoader
 from backtest.multi_backtest import MultiBacktest
 from config.settings import (
     BREAKOUT_CONFIG,
+    BREAKOUT_V2_CONFIG,
     PULLBACK_CONFIG,
     RISK_CONFIG,
     SCANNER_CONFIG,
@@ -36,6 +37,7 @@ from config.settings import (
 from execution.simulator import ExecutionSimulator
 from storage.database import Database
 from strategy.breakout import MomentumBreakoutStrategy
+from strategy.breakout_v2 import MomentumBreakoutV2Strategy
 from strategy.pullback import TrendPullbackStrategy
 from strategy.swing import SwingStrategy
 
@@ -56,7 +58,7 @@ BARS_PER_DAY = {"1h": 24, "4h": 6, "1d": 1, "5m": 288, "15m": 96}
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-symbol paper trading backtest")
-    p.add_argument("--strategy", choices=["swing", "scalp", "breakout", "pullback"], default="swing")
+    p.add_argument("--strategy", choices=["swing", "scalp", "breakout", "pullback", "breakout_v2"], default="swing")
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--smoke", action="store_true", help="2 coin / 30 gün hızlı test")
     p.add_argument("--symbols", nargs="+", default=None, help="Coin listesi (default: UNIVERSE)")
@@ -93,6 +95,11 @@ def _make_strategy_factory(strategy: str):
             return TrendPullbackStrategy(config=PULLBACK_CONFIG)
         return factory, "pullback_1h", TRADING_CONFIG["timeframe"]
 
+    if strategy == "breakout_v2":
+        def factory():
+            return MomentumBreakoutV2Strategy(config=BREAKOUT_V2_CONFIG)
+        return factory, "breakout_v2_1h", TRADING_CONFIG["timeframe"]
+
     raise ValueError(f"Bilinmeyen strateji: {strategy}")
 
 
@@ -110,14 +117,28 @@ def main() -> None:
 
     strategy_factory, strategy_name, timeframe = _make_strategy_factory(args.strategy)
 
-    # TP/SL her strateji için kendi config'inden gelir
-    _tp_sl_map = {
-        "swing":    (STRATEGY_CONFIG.get("take_profit_pct", 0.02), STRATEGY_CONFIG.get("stop_loss_pct", 0.01)),
-        "breakout": (BREAKOUT_CONFIG["take_profit_pct"], BREAKOUT_CONFIG["stop_loss_pct"]),
-        "pullback": (PULLBACK_CONFIG["take_profit_pct"], PULLBACK_CONFIG["stop_loss_pct"]),
-        "scalp":    (0.024, 0.012),
+    # TP/SL + partial exit her strateji için kendi config'inden gelir
+    _exit_map = {
+        "swing":    (STRATEGY_CONFIG.get("take_profit_pct", 0.02), STRATEGY_CONFIG.get("stop_loss_pct", 0.01), 0.0, 0.5, 0.0),
+        "breakout": (BREAKOUT_CONFIG["take_profit_pct"], BREAKOUT_CONFIG["stop_loss_pct"], 0.0, 0.5, 0.0),
+        "pullback": (
+            PULLBACK_CONFIG["take_profit_pct"],
+            PULLBACK_CONFIG["stop_loss_pct"],
+            PULLBACK_CONFIG["partial_tp1_pct"],
+            PULLBACK_CONFIG["partial_tp1_size"],
+            PULLBACK_CONFIG["trailing_stop_pct"],
+        ),
+        "breakout_v2": (
+            BREAKOUT_V2_CONFIG["take_profit_pct"],
+            BREAKOUT_V2_CONFIG["stop_loss_pct"],
+            BREAKOUT_V2_CONFIG["partial_tp1_pct"],
+            BREAKOUT_V2_CONFIG["partial_tp1_size"],
+            BREAKOUT_V2_CONFIG["trailing_stop_pct"],
+        ),
+        "scalp":    (0.024, 0.012, 0.0, 0.5, 0.0),
     }
-    take_profit_pct, stop_loss_pct = _tp_sl_map.get(args.strategy, (0.02, 0.01))
+    take_profit_pct, stop_loss_pct, partial_tp1_pct, partial_tp1_size, trailing_stop_pct = \
+        _exit_map.get(args.strategy, (0.02, 0.01, 0.0, 0.5, 0.0))
 
     until_dt = datetime.now(timezone.utc)
     since_dt = until_dt - timedelta(days=days)
@@ -160,6 +181,9 @@ def main() -> None:
         position_size_pct=0.10,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
+        partial_tp1_pct=partial_tp1_pct,
+        partial_tp1_size=partial_tp1_size,
+        trailing_stop_pct=trailing_stop_pct,
         scanner_config=SCANNER_CONFIG,
         risk_config=RISK_CONFIG,
         simulator=simulator,

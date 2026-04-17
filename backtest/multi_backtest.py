@@ -113,6 +113,9 @@ class MultiBacktest:
         position_size_pct: float = 0.10,
         take_profit_pct: float = 0.02,
         stop_loss_pct: float = 0.01,
+        partial_tp1_pct: float = 0.0,
+        partial_tp1_size: float = 0.5,
+        trailing_stop_pct: float = 0.0,
         scanner_config: dict | None = None,
         risk_config: dict | None = None,
         simulator=None,
@@ -124,6 +127,9 @@ class MultiBacktest:
         self._position_size_pct = position_size_pct
         self._take_profit_pct = take_profit_pct
         self._stop_loss_pct = stop_loss_pct
+        self._partial_tp1_pct = partial_tp1_pct
+        self._partial_tp1_size = partial_tp1_size
+        self._trailing_stop_pct = trailing_stop_pct
         self._scanner_config = scanner_config or {}
         self._risk_config = risk_config or {}
         self._simulator = simulator
@@ -154,6 +160,9 @@ class MultiBacktest:
             position_size_pct=self._position_size_pct,
             take_profit_pct=self._take_profit_pct,
             stop_loss_pct=self._stop_loss_pct,
+            partial_tp1_pct=self._partial_tp1_pct,
+            partial_tp1_size=self._partial_tp1_size,
+            trailing_stop_pct=self._trailing_stop_pct,
             simulator=self._simulator,
         )
 

@@ -125,6 +125,30 @@ class Portfolio:
 
         return trade_pnl
 
+    def reduce_long(self, symbol: str, price: float, quantity: float) -> float:
+        """Long pozisyonun bir kısmını kapat. Realized PnL döner."""
+        if symbol not in self._positions:
+            raise PortfolioError(f"reduce_long: Pozisyon bulunamadı — {symbol}")
+        pos = self._positions[symbol]
+        if quantity >= pos.quantity:
+            return self.close_long(symbol, price)
+
+        fraction = quantity / pos.quantity
+        partial_cost = pos.entry_cost * fraction
+        exit_proceeds = quantity * price * (1 - self._commission_pct - self._slippage_pct)
+        trade_pnl = exit_proceeds - partial_cost
+
+        self._cash += exit_proceeds
+        self._realized_pnl += trade_pnl
+        pos.quantity -= quantity
+        pos.entry_cost -= partial_cost
+
+        logger.info(
+            "REDUCE LONG | %s | qty=%.6f | exit_price=%.2f | pnl=%.2f | remaining=%.6f",
+            symbol, quantity, price, trade_pnl, pos.quantity,
+        )
+        return trade_pnl
+
     def update_price(self, symbol: str, price: float) -> None:
         """Açık pozisyonun güncel fiyatını güncelle (unrealized PnL yansır)."""
         self._current_prices[symbol] = price

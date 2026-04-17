@@ -76,6 +76,9 @@ class MultiSymbolEngine:
         position_size_pct: float = 0.10,
         take_profit_pct: float = 0.02,
         stop_loss_pct: float = 0.01,
+        partial_tp1_pct: float = 0.0,
+        partial_tp1_size: float = 0.5,
+        trailing_stop_pct: float = 0.0,
         simulator=None,
     ) -> None:
         self._symbol_strategies = symbol_strategies
@@ -85,7 +88,13 @@ class MultiSymbolEngine:
         self._position_size_pct = position_size_pct
         self._take_profit_pct = take_profit_pct
         self._stop_loss_pct = stop_loss_pct
+        self._partial_tp1_pct = partial_tp1_pct
+        self._partial_tp1_size = partial_tp1_size
+        self._trailing_stop_pct = trailing_stop_pct
         self._simulator = simulator
+        # Per-symbol exit state
+        self._partial_tp_done: dict[str, bool] = {}
+        self._dynamic_sl: dict[str, float] = {}
 
     def run(self) -> MultiRunSummary:
         if not self._symbol_strategies:
@@ -199,6 +208,9 @@ class MultiSymbolEngine:
             price=fill_price, quantity=qty,
             bar_index=bar_index, timestamp=bar_ts,
         ))
+        # Exit state başlat
+        self._partial_tp_done[symbol] = False
+        self._dynamic_sl[symbol] = fill_price * (1 - self._stop_loss_pct)
         logger.info("OPEN | bar=%d | %s | fill=%.4f | qty=%.6f", bar_index, symbol, fill_price, qty)
 
     def _close_position(
@@ -227,6 +239,8 @@ class MultiSymbolEngine:
             bar_index=bar_index, timestamp=bar_ts,
             realized_pnl=realized_pnl,
         ))
+        self._partial_tp_done.pop(symbol, None)
+        self._dynamic_sl.pop(symbol, None)
         logger.info("CLOSE | bar=%d | %s | fill=%.4f | pnl=%.2f", bar_index, symbol, fill_price, realized_pnl)
 
     # ── Yardımcılar ───────────────────────────────────────────────────────────
@@ -244,21 +258,74 @@ class MultiSymbolEngine:
         if pos is None:
             return False
         entry = pos.entry_price
+
+        # ── Partial TP1 ───────────────────────────────────────────────────────
+        if self._partial_tp1_pct > 0 and not self._partial_tp_done.get(symbol, True):
+            if price >= entry * (1 + self._partial_tp1_pct):
+                qty = pos.quantity * self._partial_tp1_size
+                self._partial_close_position(symbol, price, qty, df_slice, bar_index, bar_ts, trades)
+                self._partial_tp_done[symbol] = True
+                # Break-even: SL entry'e çekil
+                be_sl = entry
+                # Trailing başlat
+                if self._trailing_stop_pct > 0:
+                    be_sl = max(be_sl, price * (1 - self._trailing_stop_pct))
+                self._dynamic_sl[symbol] = be_sl
+                logger.info(
+                    "PARTIAL TP1 | bar=%d | %s | price=%.4f | sl→%.4f (break-even)",
+                    bar_index, symbol, price, be_sl,
+                )
+                # Pozisyon hâlâ açık (kalan %50)
+                if self._portfolio.positions.get(symbol) is None:
+                    return True
+                return False
+
+        # ── Trailing stop güncelle ────────────────────────────────────────────
+        if self._trailing_stop_pct > 0 and self._partial_tp_done.get(symbol, False):
+            new_sl = price * (1 - self._trailing_stop_pct)
+            self._dynamic_sl[symbol] = max(self._dynamic_sl.get(symbol, 0.0), new_sl)
+
+        # ── Full TP ───────────────────────────────────────────────────────────
         if price >= entry * (1 + self._take_profit_pct):
-            logger.info(
-                "TP HIT | bar=%d | %s | entry=%.4f | current=%.4f | +%.1f%%",
-                bar_index, symbol, entry, price, self._take_profit_pct * 100,
-            )
+            logger.info("TP HIT | bar=%d | %s | entry=%.4f | price=%.4f", bar_index, symbol, entry, price)
             self._close_position(symbol, df_slice, bar_index, bar_ts, trades)
             return True
-        if price <= entry * (1 - self._stop_loss_pct):
-            logger.info(
-                "SL HIT | bar=%d | %s | entry=%.4f | current=%.4f | -%.1f%%",
-                bar_index, symbol, entry, price, self._stop_loss_pct * 100,
-            )
+
+        # ── SL (dinamik) ──────────────────────────────────────────────────────
+        current_sl = self._dynamic_sl.get(symbol, entry * (1 - self._stop_loss_pct))
+        if price <= current_sl:
+            logger.info("SL HIT | bar=%d | %s | price=%.4f | sl=%.4f", bar_index, symbol, price, current_sl)
             self._close_position(symbol, df_slice, bar_index, bar_ts, trades)
             return True
+
         return False
+
+    def _partial_close_position(
+        self,
+        symbol: str,
+        price: float,
+        quantity: float,
+        df_slice: pd.DataFrame,
+        bar_index: int,
+        bar_ts: pd.Timestamp,
+        trades: list[Trade],
+    ) -> None:
+        fill_price = self._fill_price("SELL", price, quantity, df_slice)
+        try:
+            realized_pnl = self._portfolio.reduce_long(symbol, fill_price, quantity)
+        except PortfolioError as exc:
+            logger.warning("MultiEngine PARTIAL CLOSE başarısız: %s", exc)
+            return
+        trades.append(Trade(
+            symbol=symbol, side="LONG", action="CLOSE",
+            price=fill_price, quantity=quantity,
+            bar_index=bar_index, timestamp=bar_ts,
+            realized_pnl=realized_pnl,
+        ))
+        logger.info(
+            "PARTIAL CLOSE | bar=%d | %s | fill=%.4f | qty=%.6f | pnl=%.2f",
+            bar_index, symbol, fill_price, quantity, realized_pnl,
+        )
 
     def _compute_quantity(self, price: float) -> float:
         target = self._portfolio.total_equity * self._position_size_pct
