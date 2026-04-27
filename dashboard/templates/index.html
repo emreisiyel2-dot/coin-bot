@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="60">
+  <title>Paper Trading Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    header {
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3148;
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 17px; font-weight: 600; color: #f1f5f9; }
+    header h1 span { color: #6366f1; }
+    .badge {
+      background: #1e2a1e; border: 1px solid #22c55e33;
+      color: #22c55e; font-size: 11px; font-weight: 600;
+      padding: 3px 10px; border-radius: 20px; letter-spacing: 0.5px;
+    }
+    .meta { font-size: 12px; color: #64748b; margin-left: 12px; }
+
+    main { max-width: 1340px; margin: 0 auto; padding: 24px 20px 56px; }
+
+    .section-title {
+      font-size: 11px; font-weight: 700; color: #64748b;
+      text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;
+    }
+
+    /* ── Cards ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 12px; margin-bottom: 28px;
+    }
+    .card {
+      background: #1a1d27; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 16px 18px;
+    }
+    .card.highlight { border-color: #6366f133; background: #16192a; }
+    .card-label {
+      font-size: 10px; font-weight: 700; color: #64748b;
+      text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 6px;
+    }
+    .card-value { font-size: 21px; font-weight: 700; color: #f1f5f9; }
+    .card-value.pos { color: #22c55e; }
+    .card-value.neg { color: #f43f5e; }
+    .card-value.neu { color: #6366f1; }
+    .card-sub { font-size: 11px; color: #475569; margin-top: 3px; }
+
+    /* ── Strategy comparison row ── */
+    .compare-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+      margin-bottom: 28px;
+    }
+    .compare-card {
+      background: #1a1d27; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 18px 20px;
+    }
+    .compare-card h3 {
+      font-size: 13px; font-weight: 700; margin-bottom: 14px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .pill {
+      font-size: 10px; font-weight: 700; padding: 2px 8px;
+      border-radius: 10px; letter-spacing: 0.4px;
+    }
+    .pill-indigo { background: #6366f122; color: #818cf8; }
+    .pill-green  { background: #22c55e22; color: #4ade80; }
+    .compare-row {
+      display: flex; justify-content: space-between;
+      padding: 6px 0; border-bottom: 1px solid #1e2233; font-size: 13px;
+    }
+    .compare-row:last-child { border-bottom: none; }
+    .compare-row .label { color: #64748b; }
+    .compare-row .val   { font-weight: 600; color: #cbd5e1; }
+
+    /* ── Chart ── */
+    .chart-wrap {
+      background: #1a1d27; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 20px 24px; margin-bottom: 28px;
+    }
+    .chart-wrap canvas { max-height: 220px; }
+
+    /* ── Tables ── */
+    .table-wrap {
+      background: #1a1d27; border: 1px solid #2d3148;
+      border-radius: 10px; overflow: hidden; margin-bottom: 28px;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      background: #12151f; padding: 9px 14px; text-align: left;
+      font-size: 10px; font-weight: 700; color: #64748b;
+      text-transform: uppercase; letter-spacing: 0.6px;
+      border-bottom: 1px solid #2d3148;
+    }
+    td { padding: 10px 14px; border-bottom: 1px solid #1e2233; color: #cbd5e1; font-size: 13px; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1e2233; }
+
+    .pnl-pos  { color: #22c55e; font-weight: 600; }
+    .pnl-neg  { color: #f43f5e; font-weight: 600; }
+    .pnl-zero { color: #475569; }
+    .status-active   { color: #22c55e; font-size: 11px; font-weight: 700; }
+    .status-disabled { color: #f43f5e; font-size: 11px; font-weight: 700; }
+    .tag-bv2 { background:#6366f122; color:#818cf8; font-size:10px; font-weight:700; padding:2px 7px; border-radius:8px; }
+    .tag-rr  { background:#22c55e22; color:#4ade80; font-size:10px; font-weight:700; padding:2px 7px; border-radius:8px; }
+    .empty-row td { color:#334155; text-align:center; padding:24px; font-style:italic; }
+
+    .refresh-hint { text-align:center; font-size:11px; color:#334155; margin-top:8px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <h1>Paper Trading <span>Dashboard</span></h1>
+    <span class="badge">PAPER ONLY</span>
+    <span class="meta">2 strateji aktif</span>
+  </div>
+  <button onclick="location.reload()"
+    style="background:#2d3148; border:none; color:#94a3b8; font-size:12px;
+           padding:6px 14px; border-radius:6px; cursor:pointer;">Yenile</button>
+</header>
+
+<main>
+
+  <!-- ── Birleşik özet kartlar ── -->
+  <div class="section-title" style="margin-top:4px;">Birleşik Sistem Özeti</div>
+  <div class="cards" style="grid-template-columns: repeat(auto-fill, minmax(160px,1fr));">
+
+    <div class="card highlight">
+      <div class="card-label">Toplam Equity</div>
+      <div class="card-value neu">${{ "{:,.2f}".format(combined_equity) }}</div>
+      <div class="card-sub">Her portföy $10,000</div>
+    </div>
+
+    <div class="card highlight">
+      <div class="card-label">Birleşik Getiri</div>
+      {% if combined_return >= 0 %}
+        <div class="card-value pos">+{{ combined_return }}%</div>
+      {% else %}
+        <div class="card-value neg">{{ combined_return }}%</div>
+      {% endif %}
+      <div class="card-sub">Başlangıçtan</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Günlük PnL</div>
+      {% if combined_dpnl >= 0 %}
+        <div class="card-value pos">+${{ "{:.2f}".format(combined_dpnl) }}</div>
+      {% else %}
+        <div class="card-value neg">-${{ "{:.2f}".format(combined_dpnl|abs) }}</div>
+      {% endif %}
+      <div class="card-sub">{{ daily_trades.combined.total }} trades ({{ daily_trades.combined.wins }}W / {{ daily_trades.combined.losses }}L)</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Trades Today</div>
+      <div class="card-value {% if daily_trades.combined.total > 0 %}neu{% endif %}">{{ daily_trades.combined.total }}</div>
+      <div class="card-sub">{{ daily_trades.combined.wins }}W / {{ daily_trades.combined.losses }}L</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Win Rate Today</div>
+      <div class="card-value" style="color:{% if daily_trades.combined.win_rate >= 50 %}#22c55e{% elif daily_trades.combined.total > 0 %}#f43f5e{% else %}#475569{% endif %};">{{ daily_trades.combined.win_rate }}%</div>
+      <div class="card-sub">today</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Açık Pozisyon</div>
+      <div class="card-value {% if combined_open > 0 %}neu{% endif %}">{{ combined_open }}</div>
+      <div class="card-sub">Toplam aktif</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Tamamlanan Trade</div>
+      <div class="card-value">{{ combined_closed }}</div>
+      <div class="card-sub">Her iki strateji</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">breakout_v2</div>
+      <div class="card-value" style="font-size:18px;">{{ breakout.closed_count }} trade</div>
+      <div class="card-sub">4H / son: {{ breakout.last_run }}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">rsi_reversion</div>
+      <div class="card-value" style="font-size:18px;">{{ intraday.closed_count }} trade</div>
+      <div class="card-sub">15m / son: {{ intraday.last_run }}</div>
+    </div>
+
+  </div>
+
+  <!-- ── System Health ── -->
+  <div class="section-title" style="margin-top:4px;">System Health</div>
+  <div class="cards" style="grid-template-columns: repeat(auto-fill, minmax(160px,1fr));">
+
+    <div class="card">
+      <div class="card-label">breakout_v2</div>
+      {% set bk_health = obs.health.get("breakout_v2", "NO_DATA") %}
+      <div class="card-value" style="font-size:18px; color:{% if bk_health == 'OK' %}#22c55e{% elif bk_health == 'STALE' %}#f43f5e{% else %}#64748b{% endif %};">
+        {{ bk_health }}
+      </div>
+      <div class="card-sub">
+        {% if obs.last_runs.get("breakout_v2") %}
+          last: {{ obs.last_runs["breakout_v2"]["ts"][-8:] }} ({{ obs.last_runs["breakout_v2"]["duration_sec"] }}s)
+        {% else %}
+          no runs yet
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">rsi_reversion</div>
+      {% set rr_health = obs.health.get("rsi_reversion", "NO_DATA") %}
+      <div class="card-value" style="font-size:18px; color:{% if rr_health == 'OK' %}#22c55e{% elif rr_health == 'STALE' %}#f43f5e{% else %}#64748b{% endif %};">
+        {{ rr_health }}
+      </div>
+      <div class="card-sub">
+        {% if obs.last_runs.get("rsi_reversion") %}
+          last: {{ obs.last_runs["rsi_reversion"]["ts"][-8:] }} ({{ obs.last_runs["rsi_reversion"]["duration_sec"] }}s)
+        {% else %}
+          no runs yet
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Total Scans Today</div>
+      <div class="card-value">{{ obs.total_scans_today }}</div>
+      <div class="card-sub">last scan: {{ obs.last_scan_ts[-5:] if obs.last_scan_ts != '—' else '—' }}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">no_signal</div>
+      <div class="card-value" style="color:#64748b;">{{ obs.scan_counts_today.get("no_signal", 0) }}</div>
+      <div class="card-sub">today</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">candidate_rejected</div>
+      <div class="card-value" style="color:#eab308;">{{ obs.scan_counts_today.get("candidate_rejected", 0) }}</div>
+      <div class="card-sub">today</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">signal_accepted</div>
+      <div class="card-value" style="color:#22c55e;">{{ obs.scan_counts_today.get("signal_accepted", 0) }}</div>
+      <div class="card-sub">today</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Errors</div>
+      <div class="card-value" style="color:{% if obs.total_errors > 0 %}#f43f5e{% else %}#22c55e{% endif %};">{{ obs.total_errors }}</div>
+      <div class="card-sub">total</div>
+    </div>
+
+  </div>
+
+  <!-- ── Capital Allocation ── -->
+  <div class="section-title" style="margin-top:4px;">Capital Allocation</div>
+  <div class="cards" style="grid-template-columns: repeat(auto-fill, minmax(150px,1fr));">
+
+    <div class="card highlight">
+      <div class="card-label">Total Equity</div>
+      <div class="card-value neu">${{ "{:,.2f}".format(combined_equity) }}</div>
+      <div class="card-sub">2 portfolios</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Free Cash</div>
+      <div class="card-value">${{ "{:,.2f}".format(combined_cash) }}</div>
+      <div class="card-sub">{{ "%.1f"|format(100 - combined_util_pct) }}% available</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Capital In Use</div>
+      <div class="card-value" style="color:#818cf8;">${{ "{:,.2f}".format(combined_allocated) }}</div>
+      <div class="card-sub">{{ combined_open }} positions</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Utilization</div>
+      <div class="card-value" style="color:{% if combined_util_pct > 60 %}#f43f5e{% elif combined_util_pct > 30 %}#eab308{% else %}#22c55e{% endif %};">{{ combined_util_pct }}%</div>
+      <div class="card-sub">of total equity</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">BV2 Allocated</div>
+      <div class="card-value" style="font-size:17px;">${{ "{:,.2f}".format(breakout.allocated_capital) }}</div>
+      <div class="card-sub">{{ breakout.utilization_pct }}% of portfolio</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">RR Allocated</div>
+      <div class="card-value" style="font-size:17px;">${{ "{:,.2f}".format(intraday.allocated_capital) }}</div>
+      <div class="card-sub">{{ intraday.utilization_pct }}% of portfolio</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">BV2 Cash</div>
+      <div class="card-value" style="font-size:17px;">${{ "{:,.2f}".format(breakout.cash) }}</div>
+      <div class="card-sub">{{ "%.1f"|format(100 - breakout.utilization_pct) }}% free</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">RR Cash</div>
+      <div class="card-value" style="font-size:17px;">${{ "{:,.2f}".format(intraday.cash) }}</div>
+      <div class="card-sub">{{ "%.1f"|format(100 - intraday.utilization_pct) }}% free</div>
+    </div>
+
+  </div>
+
+  <!-- ── Recent Activity ── -->
+  <div class="section-title">Recent Activity</div>
+  <div class="table-wrap" style="margin-bottom:28px;">
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Bot</th><th>Symbol</th><th>State</th><th>Reason</th>
+      </tr></thead>
+      <tbody>
+        {% if obs.recent_scans %}
+          {% for s in obs.recent_scans %}
+          <tr>
+            <td style="color:#64748b; font-size:12px;">{{ s.ts[-5:] }}</td>
+            <td>
+              {% if s.bot == "breakout_v2" %}
+                <span class="tag-bv2">BV2</span>
+              {% else %}
+                <span class="tag-rr">RR</span>
+              {% endif %}
+            </td>
+            <td>{{ s.symbol }}</td>
+            <td style="color:
+              {% if s.signal_state == 'signal_accepted' %}#22c55e
+              {% elif s.signal_state == 'candidate_rejected' %}#eab308
+              {% elif s.signal_state == 'no_signal' %}#64748b
+              {% elif s.signal_state == 'scanned' %}#818cf8
+              {% else %}#94a3b8{% endif %};
+            ">{{ s.signal_state }}</td>
+            <td style="color:#475569; font-size:12px;">{{ s.reject_reason or '—' }}</td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr class="empty-row"><td colspan="5">No scan events yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if obs.recent_errors %}
+  <!-- ── Recent Errors ── -->
+  <div class="section-title">Recent Errors</div>
+  <div class="table-wrap" style="margin-bottom:28px;">
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Bot</th><th>Context</th><th>Error</th>
+      </tr></thead>
+      <tbody>
+        {% for e in obs.recent_errors %}
+        <tr>
+          <td style="color:#64748b; font-size:12px;">{{ e.ts }}</td>
+          <td>{{ e.bot }}</td>
+          <td style="color:#94a3b8;">{{ e.context }}</td>
+          <td style="color:#f43f5e; font-size:12px;">{{ e.error }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- ── Strateji karşılaştırma ── -->
+  <div class="section-title">Strateji Karşılaştırma</div>
+  <div class="compare-grid">
+
+    <div class="compare-card">
+      <h3>
+        <span class="pill pill-indigo">breakout_v2</span>
+        4H — Momentum Breakout
+      </h3>
+      <div class="compare-row"><span class="label">Equity</span><span class="val">${{ "{:,.2f}".format(breakout.equity) }}</span></div>
+      <div class="compare-row">
+        <span class="label">Getiri</span>
+        <span class="val {% if breakout.return_pct >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          {% if breakout.return_pct >= 0 %}+{% endif %}{{ breakout.return_pct }}%
+        </span>
+      </div>
+      <div class="compare-row"><span class="label">Günlük PnL</span>
+        <span class="val {% if breakout.daily_pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          {% if breakout.daily_pnl >= 0 %}+{% endif %}${{ "{:.2f}".format(breakout.daily_pnl) }}
+        </span>
+      </div>
+      <div class="compare-row"><span class="label">Trades Today</span><span class="val">{{ daily_trades.breakout.total }} ({{ daily_trades.breakout.wins }}W / {{ daily_trades.breakout.losses }}L)</span></div>
+      <div class="compare-row"><span class="label">Kapalı Trade</span><span class="val">{{ breakout.closed_count }}</span></div>
+      <div class="compare-row"><span class="label">Win Rate</span><span class="val">{{ breakout.win_rate }}%</span></div>
+      <div class="compare-row"><span class="label">Açık Pos.</span><span class="val">{{ breakout.open_count }}</span></div>
+      <div class="compare-row"><span class="label">Allocated</span><span class="val">${{ "{:,.2f}".format(breakout.allocated_capital) }} ({{ breakout.utilization_pct }}%)</span></div>
+      <div class="compare-row"><span class="label">Free Cash</span><span class="val">${{ "{:,.2f}".format(breakout.cash) }}</span></div>
+      <div class="compare-row"><span class="label">Son Çalışma</span><span class="val" style="font-size:11px;">{{ breakout.last_run }}</span></div>
+    </div>
+
+    <div class="compare-card">
+      <h3>
+        <span class="pill pill-green">rsi_reversion</span>
+        15m — RSI Mean Reversion
+      </h3>
+      <div class="compare-row"><span class="label">Equity</span><span class="val">${{ "{:,.2f}".format(intraday.equity) }}</span></div>
+      <div class="compare-row">
+        <span class="label">Getiri</span>
+        <span class="val {% if intraday.return_pct >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          {% if intraday.return_pct >= 0 %}+{% endif %}{{ intraday.return_pct }}%
+        </span>
+      </div>
+      <div class="compare-row"><span class="label">Günlük PnL</span>
+        <span class="val {% if intraday.daily_pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          {% if intraday.daily_pnl >= 0 %}+{% endif %}${{ "{:.2f}".format(intraday.daily_pnl) }}
+        </span>
+      </div>
+      <div class="compare-row"><span class="label">Trades Today</span><span class="val">{{ daily_trades.intraday.total }} ({{ daily_trades.intraday.wins }}W / {{ daily_trades.intraday.losses }}L)</span></div>
+      <div class="compare-row"><span class="label">Kapalı Trade</span><span class="val">{{ intraday.closed_count }}</span></div>
+      <div class="compare-row"><span class="label">Win Rate</span><span class="val">{{ intraday.win_rate }}%</span></div>
+      <div class="compare-row"><span class="label">Açık Pos.</span><span class="val">{{ intraday.open_count }}</span></div>
+      <div class="compare-row"><span class="label">Allocated</span><span class="val">${{ "{:,.2f}".format(intraday.allocated_capital) }} ({{ intraday.utilization_pct }}%)</span></div>
+      <div class="compare-row"><span class="label">Free Cash</span><span class="val">${{ "{:,.2f}".format(intraday.cash) }}</span></div>
+      <div class="compare-row"><span class="label">Son Çalışma</span><span class="val" style="font-size:11px;">{{ intraday.last_run }}</span></div>
+    </div>
+
+  </div>
+
+  <!-- ── Side-by-side strategy panels ── -->
+  <div class="compare-grid">
+
+    <!-- ══ BREAKOUT_V2 ══ -->
+    <div>
+      <div class="section-title" style="display:flex; align-items:center; gap:8px;">
+        <span class="pill pill-indigo">breakout_v2</span> 4H
+      </div>
+
+      <div class="chart-wrap" style="margin-bottom:16px;">
+        {% if breakout.eq_values %}
+          <canvas id="chartBv2"></canvas>
+        {% else %}
+          <p style="color:#334155; text-align:center; padding:24px; font-style:italic;">
+            Henüz equity verisi yok.
+          </p>
+        {% endif %}
+      </div>
+
+      <div class="table-wrap" style="margin-bottom:16px;">
+        <table>
+          <thead><tr>
+            <th>Sembol</th><th>Boyut</th><th>Alloc%</th><th>PnL</th><th>MaxLoss</th><th>Süre</th>
+          </tr></thead>
+          <tbody>
+            {% if breakout.open_positions %}
+              {% for p in breakout.open_positions %}
+              <tr>
+                <td><strong>{{ p.symbol }}</strong></td>
+                <td>${{ "{:,.2f}".format(p.size_usdt) }}</td>
+                <td style="font-size:12px;">{{ p.alloc_pct_total }}%</td>
+                <td class="{% if p.unrealized_pnl > 0 %}pnl-pos{% elif p.unrealized_pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+                  {% if p.unrealized_pnl > 0 %}+{% endif %}${{ "{:.2f}".format(p.unrealized_pnl) }}
+                </td>
+                <td style="color:#f43f5e; font-size:12px;">-${{ "{:.2f}".format(p.max_loss) }}</td>
+                <td style="color:#64748b; font-size:12px;">{{ p.duration_min }}dk</td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="empty-row"><td colspan="6">Açık pozisyon yok.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap" style="margin-bottom:16px;">
+        <table>
+          <thead><tr>
+            <th>Sembol</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>Neden</th>
+          </tr></thead>
+          <tbody>
+            {% if breakout.closed_trades %}
+              {% for t in breakout.closed_trades[:10] %}
+              <tr>
+                <td><strong>{{ t.symbol }}</strong></td>
+                <td>{% if t.entry_price == '—' %}—{% else %}${{ "{:.4f}".format(t.entry_price) }}{% endif %}</td>
+                <td>{% if t.exit_price == '—' %}—{% else %}${{ "{:.4f}".format(t.exit_price) }}{% endif %}</td>
+                <td class="{% if t.pnl > 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+                  {% if t.pnl > 0 %}+{% endif %}${{ "{:.2f}".format(t.pnl) }}
+                </td>
+                <td style="color:{% if t.reason=='TP' %}#22c55e{% elif t.reason in ['SL','TRAILING'] %}#f43f5e{% else %}#94a3b8{% endif %};">{{ t.reason }}</td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="empty-row"><td colspan="5">Henüz trade yok.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Sembol</th><th>Tr</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th>
+          </tr></thead>
+          <tbody>
+            {% for s in breakout.sym_perf %}
+            <tr>
+              <td><strong>{{ s.symbol }}</strong></td>
+              <td>{{ s.trades }}</td>
+              <td class="pnl-pos">{{ s.wins }}</td>
+              <td class="pnl-neg">{{ s.losses }}</td>
+              <td>{% if s.trades > 0 %}<span style="font-weight:600; color:{% if s.win_rate >= 50 %}#22c55e{% else %}#f43f5e{% endif %};">{{ s.win_rate }}%</span>{% else %}<span class="pnl-zero">—</span>{% endif %}</td>
+              <td class="{% if s.pnl > 0 %}pnl-pos{% elif s.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+                {% if s.pnl > 0 %}+{% endif %}${{ "{:.2f}".format(s.pnl) }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══ RSI_REVERSION ══ -->
+    <div>
+      <div class="section-title" style="display:flex; align-items:center; gap:8px;">
+        <span class="pill pill-green">rsi_reversion</span> 15m
+      </div>
+
+      <div class="chart-wrap" style="margin-bottom:16px;">
+        {% if intraday.eq_values %}
+          <canvas id="chartRr"></canvas>
+        {% else %}
+          <p style="color:#334155; text-align:center; padding:24px; font-style:italic;">
+            Henüz equity verisi yok.
+          </p>
+        {% endif %}
+      </div>
+
+      <div class="table-wrap" style="margin-bottom:16px;">
+        <table>
+          <thead><tr>
+            <th>Sembol</th><th>Boyut</th><th>Alloc%</th><th>PnL</th><th>MaxLoss</th><th>Süre</th>
+          </tr></thead>
+          <tbody>
+            {% if intraday.open_positions %}
+              {% for p in intraday.open_positions %}
+              <tr>
+                <td><strong>{{ p.symbol }}</strong></td>
+                <td>${{ "{:,.2f}".format(p.size_usdt) }}</td>
+                <td style="font-size:12px;">{{ p.alloc_pct_total }}%</td>
+                <td class="{% if p.unrealized_pnl > 0 %}pnl-pos{% elif p.unrealized_pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+                  {% if p.unrealized_pnl > 0 %}+{% endif %}${{ "{:.2f}".format(p.unrealized_pnl) }}
+                </td>
+                <td style="color:#f43f5e; font-size:12px;">-${{ "{:.2f}".format(p.max_loss) }}</td>
+                <td style="color:#64748b; font-size:12px;">{{ p.duration_min }}dk</td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="empty-row"><td colspan="6">Açık pozisyon yok.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap" style="margin-bottom:16px;">
+        <table>
+          <thead><tr>
+            <th>Sembol</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>Neden</th>
+          </tr></thead>
+          <tbody>
+            {% if intraday.closed_trades %}
+              {% for t in intraday.closed_trades[:10] %}
+              <tr>
+                <td><strong>{{ t.symbol }}</strong></td>
+                <td>{% if t.entry_price == '—' %}—{% else %}${{ "{:.4f}".format(t.entry_price) }}{% endif %}</td>
+                <td>{% if t.exit_price == '—' %}—{% else %}${{ "{:.4f}".format(t.exit_price) }}{% endif %}</td>
+                <td class="{% if t.pnl > 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+                  {% if t.pnl > 0 %}+{% endif %}${{ "{:.2f}".format(t.pnl) }}
+                </td>
+                <td style="color:{% if t.reason=='TP' %}#22c55e{% else %}#f43f5e{% endif %};">{{ t.reason }}</td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="empty-row"><td colspan="5">Henüz trade yok.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Sembol</th><th>Tr</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th>
+          </tr></thead>
+          <tbody>
+            {% for s in intraday.sym_perf %}
+            <tr>
+              <td><strong>{{ s.symbol }}</strong></td>
+              <td>{{ s.trades }}</td>
+              <td class="pnl-pos">{{ s.wins }}</td>
+              <td class="pnl-neg">{{ s.losses }}</td>
+              <td>{% if s.trades > 0 %}<span style="font-weight:600; color:{% if s.win_rate >= 50 %}#22c55e{% else %}#f43f5e{% endif %};">{{ s.win_rate }}%</span>{% else %}<span class="pnl-zero">—</span>{% endif %}</td>
+              <td class="{% if s.pnl > 0 %}pnl-pos{% elif s.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+                {% if s.pnl > 0 %}+{% endif %}${{ "{:.2f}".format(s.pnl) }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <p class="refresh-hint">Sayfa her 60 saniyede otomatik yenilenir.</p>
+</main>
+
+<script>
+function makeChart(id, labels, values, color) {
+  if (!document.getElementById(id)) return;
+  new Chart(document.getElementById(id).getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Equity (USDT)',
+        data: values,
+        borderColor: color,
+        backgroundColor: color + '14',
+        borderWidth: 2,
+        pointRadius: values.length > 60 ? 0 : 3,
+        pointHoverRadius: 5,
+        tension: 0.3,
+        fill: true,
+      }, {
+        label: 'Başlangıç',
+        data: labels.map(() => 10000),
+        borderColor: '#334155',
+        borderWidth: 1,
+        borderDash: [5, 5],
+        pointRadius: 0,
+        fill: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8', font: { size: 12 } } },
+        tooltip: {
+          backgroundColor: '#1a1d27', borderColor: '#2d3148', borderWidth: 1,
+          titleColor: '#94a3b8', bodyColor: '#e2e8f0',
+          callbacks: { label: c => ` $${c.parsed.y.toLocaleString('en-US', {minimumFractionDigits:2})}` }
+        }
+      },
+      scales: {
+        x: { ticks: { color:'#475569', maxTicksLimit:10, font:{size:11} }, grid:{color:'#1e2233'} },
+        y: {
+          ticks: { color:'#475569', font:{size:11}, callback: v => '$'+v.toLocaleString('en-US') },
+          grid: { color:'#1e2233' }
+        }
+      }
+    }
+  });
+}
+
+{% if breakout.eq_values %}
+makeChart('chartBv2', {{ breakout.eq_labels | tojson }}, {{ breakout.eq_values | tojson }}, '#6366f1');
+{% endif %}
+{% if intraday.eq_values %}
+makeChart('chartRr', {{ intraday.eq_labels | tojson }}, {{ intraday.eq_values | tojson }}, '#22c55e');
+{% endif %}
+</script>
+
+</body>
+</html>

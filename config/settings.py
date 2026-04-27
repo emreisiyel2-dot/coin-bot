@@ -54,6 +54,14 @@ UNIVERSE_SYMBOLS = [s.strip() for s in os.getenv(
     "BTC/USDT",
 ).split(",")]
 
+# ── Intraday symbol universe ──────────────────────────────────────────────────
+INTRADAY_SYMBOL_MODE = os.getenv("INTRADAY_SYMBOL_MODE", "core").lower()
+SYMBOL_DISCOVERY_ENABLED = os.getenv("SYMBOL_DISCOVERY_ENABLED", "false").lower() == "true"
+
+# ── Alerts ────────────────────────────────────────────────────────────────────
+ALERTS_ENABLED = os.getenv("ALERTS_ENABLED", "true").lower() == "true"
+TELEGRAM_ALERTS_ENABLED = os.getenv("TELEGRAM_ALERTS_ENABLED", "false").lower() == "true"
+
 SCANNER_CONFIG = {
     # Filtreler
     "min_atr_pct":              _float("SCAN_MIN_ATR_PCT", 0.002),   # fiyatın %0.2'si
@@ -97,6 +105,16 @@ BREAKOUT_V2_CONFIG = {
     "ema_regime_period":     _int("BV2_EMA_REGIME", 200),
     "adx_period":            _int("BV2_ADX_PERIOD", 14),
     "adx_min":               _float("BV2_ADX_MIN", 25.0),
+}
+
+RSI_REVERSION_CONFIG = {
+    "rsi_period":      _int("RR_RSI_PERIOD", 7),
+    "rsi_oversold":    _float("RR_RSI_OVERSOLD", 33.0),
+    "ema_fast_period": _int("RR_EMA_FAST", 20),
+    "ema_slow_period": _int("RR_EMA_SLOW", 50),
+    "take_profit_pct": _float("RR_TP_PCT", 0.015),
+    "stop_loss_pct":   _float("RR_SL_PCT", 0.008),
+    "cooldown_minutes": _int("RR_COOLDOWN_MIN", 120),
 }
 
 PULLBACK_CONFIG = {

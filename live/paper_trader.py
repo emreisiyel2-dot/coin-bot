@@ -19,6 +19,7 @@ import ccxt
 import pandas as pd
 
 from config.settings import BREAKOUT_V2_CONFIG
+from live.event_logger import EventLogger, capture_exception, write_dashboard_summary
 from live.risk_controls import (
     SizingResult,
     allocated_usdt,
@@ -37,15 +38,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Sabitler ──────────────────────────────────────────────────────────────────
-APPROVED_SYMBOLS   = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "NEAR/USDT"]
-TIMEFRAME          = "4h"
-LOOKBACK_BARS      = 260
-MAX_CONCURRENT     = 3
-TAKE_PROFIT_PCT    = 0.03
-STOP_LOSS_PCT      = 0.01
-TRAILING_ACTIVATE  = 0.015
-TRAILING_STOP_PCT  = 0.01
-INITIAL_CASH       = 10_000.0
+APPROVED_SYMBOLS        = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "NEAR/USDT"]
+TIMEFRAME               = "4h"
+LOOKBACK_BARS           = 260
+MAX_CONCURRENT_POSITIONS = 2
+MAX_POSITIONS_PER_SYMBOL = 1
+TAKE_PROFIT_PCT         = 0.03
+STOP_LOSS_PCT           = 0.01
+TRAILING_ACTIVATE       = 0.015
+TRAILING_STOP_PCT       = 0.01
+RISK_PER_TRADE_PCT      = 0.02
+MAX_POSITION_PCT         = 0.20   # single position cannot exceed 20% of equity
+INITIAL_CASH            = 10_000.0
 
 SYM_MIN_EVAL_TRADES = 3
 SYM_MIN_WIN_RATE    = 0.30
@@ -66,6 +70,10 @@ def _load_state() -> dict:
     if STATE_FILE.exists():
         with open(STATE_FILE) as f:
             return json.load(f)
+    return _fresh_state()
+
+
+def _fresh_state() -> dict:
     return {
         "cash":                INITIAL_CASH,
         "peak_equity":         INITIAL_CASH,
@@ -77,10 +85,17 @@ def _load_state() -> dict:
         "daily_date":          "",
         "daily_start_equity":  INITIAL_CASH,
         "daily_pnl":           0.0,
-        "daily_realized_loss": 0.0,   # sadece zarar eden trade'lerin toplamı
+        "daily_realized_loss": 0.0,
         "trade_log":           [],
-        "equity_log":          [],    # her çalışmada eklenen equity snapshot'ı
+        "equity_log":          [],
     }
+
+
+def _reset_state() -> None:
+    state = _fresh_state()
+    _save_state(state)
+    print(f"  State reset → cash=${INITIAL_CASH:,.2f} | positions=0 | trades cleared")
+    print(f"  State file: {STATE_FILE}")
 
 
 def _save_state(state: dict) -> None:
@@ -115,6 +130,7 @@ def _open_position(
     equity: float,
     prices: dict[str, float],
     now: str,
+    evt: EventLogger | None = None,
 ) -> None:
     alloc  = allocated_usdt(state["positions"])
     sizing = compute_position_size(
@@ -127,7 +143,28 @@ def _open_position(
 
     if not sizing.allowed:
         logger.warning("OPEN REDDEDİLDİ | %s | %s", symbol, sizing.reason)
+        if evt:
+            evt.log_scan(symbol, "candidate_rejected",
+                         reject_reason="max_risk_exceeded:" + sizing.reason,
+                         checks={"sizing_allowed": False})
         return
+
+    # Hard cap: position size cannot exceed MAX_POSITION_PCT of equity
+    max_size = equity * MAX_POSITION_PCT
+    if sizing.size_usdt > max_size:
+        capped_qty = max_size / price
+        logger.info(
+            "SIZE CAPPED | %s | risk_size=%.2f → cap=%.2f (%.0f%% equity) | qty=%.6f → %.6f",
+            symbol, sizing.size_usdt, max_size, MAX_POSITION_PCT * 100,
+            sizing.quantity, capped_qty,
+        )
+        if evt:
+            evt.log_scan(symbol, "size_capped_by_max_position_pct",
+                         checks={"risk_size": round(sizing.size_usdt, 2),
+                                 "capped_size": round(max_size, 2),
+                                 "max_pct": MAX_POSITION_PCT})
+        sizing = SizingResult(allowed=True, quantity=capped_qty,
+                              size_usdt=max_size, reason="capped")
 
     cost = sizing.quantity * price
     state["cash"] -= cost
@@ -140,6 +177,7 @@ def _open_position(
         "trail_sl":     price * (1 - STOP_LOSS_PCT),
         "trail_active": False,
         "entry_time":   now,
+        "risk_per_trade_pct": RISK_PER_TRADE_PCT,
     }
     logger.info(
         "OPEN  | %s | price=%.4f | qty=%.6f | size=%.2f USDT | risk≈%.2f USDT",
@@ -206,6 +244,7 @@ def _maybe_reset_daily(state: dict, today: str, prices: dict[str, float]) -> Non
 # ── Ana döngü ─────────────────────────────────────────────────────────────────
 
 def run(status_only: bool = False) -> None:
+    evt      = EventLogger("breakout_v2")
     state    = _load_state()
     exchange = ccxt.binance({"enableRateLimit": True})
     strategy = MomentumBreakoutV2Strategy(config=STRATEGY_CFG)
@@ -215,107 +254,175 @@ def run(status_only: bool = False) -> None:
     prices:  dict[str, float]     = {}
     candles: dict[str, pd.DataFrame] = {}
 
-    for symbol in APPROVED_SYMBOLS:
-        try:
-            df = _fetch_candles(symbol, exchange)
-            prices[symbol]  = float(df["close"].iloc[-1])
-            candles[symbol] = df
-        except Exception as exc:
-            logger.warning("Veri çekme hatası | %s | %s", symbol, exc)
+    evt.log_run("started")
 
-    _maybe_reset_daily(state, today, prices)
+    try:
+        for symbol in APPROVED_SYMBOLS:
+            try:
+                df = _fetch_candles(symbol, exchange)
+                prices[symbol]  = float(df["close"].iloc[-1])
+                candles[symbol] = df
+                evt.log_scan(symbol, "scanned",
+                             bars_loaded=len(df),
+                             last_candle_time=str(df["timestamp"].iloc[-1]))
+            except Exception as exc:
+                logger.warning("Veri çekme hatası | %s | %s", symbol, exc)
+                capture_exception(evt, context=f"fetch_candles:{symbol}")
 
-    equity      = _total_equity(state, prices)
-    drawdown    = equity - state["peak_equity"]
-    dd_pct      = drawdown / state["peak_equity"] * 100 if state["peak_equity"] > 0 else 0.0
-    if equity > state["peak_equity"]:
-        state["peak_equity"] = equity
+        _maybe_reset_daily(state, today, prices)
 
-    if status_only:
-        _print_status(state, prices, equity, drawdown, dd_pct)
-        return
+        equity      = _total_equity(state, prices)
+        drawdown    = equity - state["peak_equity"]
+        dd_pct      = drawdown / state["peak_equity"] * 100 if state["peak_equity"] > 0 else 0.0
+        if equity > state["peak_equity"]:
+            state["peak_equity"] = equity
 
-    # ── Açık pozisyonlar: TP / SL / Trailing ─────────────────────────────────
-    for symbol in list(state["positions"].keys()):
-        if symbol not in prices:
-            continue
-        price = prices[symbol]
-        pos   = state["positions"][symbol]
-        entry = pos["entry_price"]
+        if status_only:
+            _print_status(state, prices, equity, drawdown, dd_pct)
+            return
 
-        if not pos["trail_active"] and price >= entry * (1 + TRAILING_ACTIVATE):
-            pos["trail_active"] = True
-            logger.info("TRAILING AKTİF | %s | price=%.4f", symbol, price)
+        # ── Açık pozisyonlar: TP / SL / Trailing ─────────────────────────────────
+        for symbol in list(state["positions"].keys()):
+            if symbol not in prices:
+                continue
+            price = prices[symbol]
+            pos   = state["positions"][symbol]
+            entry = pos["entry_price"]
 
-        if pos["trail_active"]:
-            new_trail   = price * (1 - TRAILING_STOP_PCT)
-            pos["trail_sl"] = max(pos["trail_sl"], new_trail)
+            if not pos["trail_active"] and price >= entry * (1 + TRAILING_ACTIVATE):
+                pos["trail_active"] = True
+                logger.info("TRAILING AKTİF | %s | price=%.4f", symbol, price)
 
-        effective_sl = pos["trail_sl"] if pos["trail_active"] else pos["sl"]
+            if pos["trail_active"]:
+                new_trail   = price * (1 - TRAILING_STOP_PCT)
+                pos["trail_sl"] = max(pos["trail_sl"], new_trail)
 
-        if price >= pos["tp"]:
-            _close_position(state, symbol, price, now_str, "TP")
-        elif price <= effective_sl:
-            reason = "TRAILING" if pos["trail_active"] else "SL"
-            _close_position(state, symbol, price, now_str, reason)
+            effective_sl = pos["trail_sl"] if pos["trail_active"] else pos["sl"]
 
-    # Equity güncelle (kapanan pozisyonlardan sonra)
-    equity = _total_equity(state, prices)
+            tl_before = len(state["trade_log"])
+            if price >= pos["tp"]:
+                _close_position(state, symbol, price, now_str, "TP")
+            elif price <= effective_sl:
+                reason = "TRAILING" if pos["trail_active"] else "SL"
+                _close_position(state, symbol, price, now_str, reason)
+            if len(state["trade_log"]) > tl_before:
+                e = state["trade_log"][-1]
+                evt.log_trade(symbol, "CLOSE",
+                              price=e.get("price"), pnl=e.get("pnl"),
+                              reason=e.get("reason"), strategy="breakout_v2")
 
-    # ── Günlük kayıp koruması (yeni trade açmadan önce) ────────────────────────
-    u_pnl  = unrealized_pnl(state["positions"], prices)
-    guard  = check_daily_loss_guard(
-        daily_start_equity  = state["daily_start_equity"],
-        daily_realized_loss = state.get("daily_realized_loss", 0.0),
-        unrealized_pnl      = u_pnl,
-    )
-    if guard.blocked:
-        logger.warning("GÜNLÜK KORUMA AKTİF | Yeni trade açılmıyor | %s", guard.reason)
+        # Equity güncelle (kapanan pozisyonlardan sonra)
+        equity = _total_equity(state, prices)
 
-    # ── Yeni sinyal tara ──────────────────────────────────────────────────────
-    open_count = len(state["positions"])
-
-    for symbol in APPROVED_SYMBOLS:
-        if symbol not in candles:
-            continue
-        if symbol in state["positions"]:
-            continue
-        if symbol in state["disabled_symbols"]:
-            continue
-        if open_count >= MAX_CONCURRENT:
-            break
+        # ── Günlük kayıp koruması (yeni trade açmadan önce) ────────────────────────
+        u_pnl  = unrealized_pnl(state["positions"], prices)
+        guard  = check_daily_loss_guard(
+            daily_start_equity  = state["daily_start_equity"],
+            daily_realized_loss = state.get("daily_realized_loss", 0.0),
+            unrealized_pnl      = u_pnl,
+        )
         if guard.blocked:
-            break
+            logger.warning("GÜNLÜK KORUMA AKTİF | Yeni trade açılmıyor | %s", guard.reason)
 
-        try:
-            signal = strategy.generate_signal(candles[symbol])
-        except ValueError as exc:
-            logger.debug("Sinyal hatası | %s | %s", symbol, exc)
-            continue
+        # ── Yeni sinyal tara ──────────────────────────────────────────────────────
+        open_count = len(state["positions"])
 
-        if signal == Signal.BUY:
-            _open_position(state, symbol, prices[symbol], equity, prices, now_str)
-            open_count += 1
+        for symbol in APPROVED_SYMBOLS:
+            if symbol not in candles:
+                continue
+            if symbol in state["positions"]:
+                evt.log_scan(symbol, "candidate_rejected",
+                             reject_reason="position_limit_per_symbol",
+                             timeframe=TIMEFRAME,
+                             checks={"position_open": True, "max_per_symbol": MAX_POSITIONS_PER_SYMBOL})
+                continue
+            if symbol in state["disabled_symbols"]:
+                evt.log_scan(symbol, "candidate_rejected",
+                             reject_reason="symbol_disabled",
+                             timeframe=TIMEFRAME,
+                             checks={"symbol_disabled": True})
+                continue
+            if open_count >= MAX_CONCURRENT_POSITIONS:
+                evt.log_scan(symbol, "candidate_rejected",
+                             reject_reason="position_limit_reached",
+                             timeframe=TIMEFRAME,
+                             checks={"open_positions": open_count, "max_concurrent": MAX_CONCURRENT_POSITIONS})
+                break
+            if guard.blocked:
+                evt.log_scan(symbol, "candidate_rejected",
+                             reject_reason="daily_loss_guard",
+                             timeframe=TIMEFRAME,
+                             checks={"daily_loss_guard": False})
+                break
 
-    equity = _total_equity(state, prices)
-    if equity > state["peak_equity"]:
-        state["peak_equity"] = equity
+            bars_loaded = len(candles[symbol])
+            min_bars_required = max(
+                STRATEGY_CFG.get("ema_regime_period", 200) + 1,
+                STRATEGY_CFG.get("ema_slow_period", 100) + 1,
+                STRATEGY_CFG.get("breakout_period", 20) + 1,
+            )
 
-    # Equity snapshot — her çalışmada eklenir (performans takibi için)
-    state.setdefault("equity_log", []).append({
-        "time":        now_str,
-        "equity":      round(equity, 2),
-        "daily_pnl":   round(state.get("daily_pnl", 0.0), 2),
-        "open_pos":    len(state["positions"]),
-        "dd_pct":      round((equity - state["peak_equity"]) / state["peak_equity"] * 100, 3)
-                       if state["peak_equity"] > 0 else 0.0,
-    })
+            try:
+                signal = strategy.generate_signal(candles[symbol])
+            except ValueError as exc:
+                logger.debug("Sinyal hatası | %s | %s", symbol, exc)
+                evt.log_scan(symbol, "candidate_rejected",
+                             reject_reason="insufficient_bars",
+                             bars_loaded=bars_loaded,
+                             min_bars_required=min_bars_required,
+                             fetch_limit=LOOKBACK_BARS,
+                             timeframe=TIMEFRAME,
+                             checks={"bars_ok": False})
+                continue
 
-    _save_state(state)
+            if signal == Signal.BUY:
+                evt.log_scan(symbol, "signal_accepted",
+                             bars_loaded=bars_loaded,
+                             timeframe=TIMEFRAME)
+                tl_before = len(state["trade_log"])
+                _open_position(state, symbol, prices[symbol], equity, prices, now_str, evt=evt)
+                open_count += 1
+                if len(state["trade_log"]) > tl_before:
+                    e = state["trade_log"][-1]
+                    evt.log_trade(symbol, "OPEN",
+                                  price=e.get("price"), quantity=e.get("quantity"),
+                                  size_usdt=e.get("size_usdt"), strategy="breakout_v2")
+            else:
+                evt.log_scan(symbol, "no_signal",
+                             bars_loaded=bars_loaded,
+                             timeframe=TIMEFRAME)
 
-    drawdown = equity - state["peak_equity"]
-    dd_pct   = drawdown / state["peak_equity"] * 100 if state["peak_equity"] > 0 else 0.0
-    _print_status(state, prices, equity, drawdown, dd_pct)
+        equity = _total_equity(state, prices)
+        if equity > state["peak_equity"]:
+            state["peak_equity"] = equity
+
+        # Equity snapshot — her çalışmada eklenir (performans takibi için)
+        state.setdefault("equity_log", []).append({
+            "time":        now_str,
+            "equity":      round(equity, 2),
+            "daily_pnl":   round(state.get("daily_pnl", 0.0), 2),
+            "open_pos":    len(state["positions"]),
+            "dd_pct":      round((equity - state["peak_equity"]) / state["peak_equity"] * 100, 3)
+                           if state["peak_equity"] > 0 else 0.0,
+        })
+
+        _save_state(state)
+
+        drawdown = equity - state["peak_equity"]
+        dd_pct   = drawdown / state["peak_equity"] * 100 if state["peak_equity"] > 0 else 0.0
+        _print_status(state, prices, equity, drawdown, dd_pct)
+
+        evt.log_run("completed",
+                    symbols_scanned=len(candles),
+                    open_positions=len(state["positions"]),
+                    duration_sec=evt.elapsed())
+
+        write_dashboard_summary()
+
+    except Exception as exc:
+        capture_exception(evt, context="run:breakout_v2")
+        evt.log_run("error", error=str(exc), duration_sec=evt.elapsed())
+        raise
 
 
 # ── Durum raporu ──────────────────────────────────────────────────────────────
@@ -409,7 +516,11 @@ def _print_status(
 def main() -> None:
     p = argparse.ArgumentParser(description="breakout_v2 paper trader")
     p.add_argument("--status", action="store_true", help="Sadece durum göster, işlem yapma")
+    p.add_argument("--reset", action="store_true", help="State'i sıfırla (başlangıç capitaline dön)")
     args = p.parse_args()
+    if args.reset:
+        _reset_state()
+        return
     run(status_only=args.status)
 
 

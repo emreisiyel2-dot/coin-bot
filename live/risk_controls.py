@@ -8,8 +8,8 @@ Strateji mantığından tamamen bağımsızdır.
 from dataclasses import dataclass
 
 # ── Sabitler (ortam değişkeniyle ezilebilir) ─────────────────────────────────
-RISK_PCT_PER_TRADE    = 0.015   # trade başına max equity riski (%1.5)
-MAX_EXPOSURE_PCT      = 0.50    # toplam açık pozisyon / equity üst sınırı (%50)
+RISK_PCT_PER_TRADE    = 0.020   # trade başına max equity riski (%2.0)
+MAX_EXPOSURE_PCT      = 0.70    # toplam açık pozisyon / equity üst sınırı (%70)
 DAILY_LOSS_GUARD_PCT  = 0.02    # günlük kayıp limiti (%2 equity — realized + unrealized)
 MIN_TRADE_NOTIONAL    = 10.0    # USDT cinsinden minimum işlem büyüklüğü (Binance limiti)
 TAKER_FEE_PCT         = 0.001   # Binance taker ücreti (%0.1)
@@ -126,5 +126,8 @@ def unrealized_pnl(positions: dict, prices: dict[str, float]) -> float:
     total = 0.0
     for sym, pos in positions.items():
         cur = prices.get(sym, pos["entry_price"])
-        total += (cur - pos["entry_price"]) * pos["quantity"]
+        if pos.get("side") == "short":
+            total += (pos["entry_price"] - cur) * pos["quantity"]
+        else:
+            total += (cur - pos["entry_price"]) * pos["quantity"]
     return total
