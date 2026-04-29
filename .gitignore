@@ -14,3 +14,8 @@ logs/*
 !logs/.gitkeep
 backtest.db
 xx
+
+# Runtime state
+live/intraday_state.json
+live/paper_state.json
+backups/
