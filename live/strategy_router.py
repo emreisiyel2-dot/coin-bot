@@ -90,3 +90,77 @@ def blend_allocations(
         {s: round(w, 2) for s, w in blended.items()},
     )
     return {s: round(w, 4) for s, w in blended.items()}
+
+
+KILL_SWITCH_MIN_TRADES = 15
+KILL_SWITCH_SOFT_WR = 0.35
+KILL_SWITCH_HARD_WR = 0.25
+KILL_SWITCH_FLOOR = 0.1
+
+
+def apply_kill_switch(
+    allocations: dict[str, float],
+    performance: dict[str, dict],
+) -> tuple[dict[str, float], dict[str, dict]]:
+    """Reduce or disable consistently underperforming strategies.
+
+    Soft: win_rate < 0.35 AND total_pnl < 0 → weight * 0.5
+    Hard: win_rate < 0.25 AND total_pnl < 0 → weight = 0.0
+
+    Returns (adjusted_allocations, kill_switch_status).
+    Skips single-strategy and insufficient_data.
+    """
+    if len(allocations) <= 1:
+        return dict(allocations), {}
+
+    adjusted = dict(allocations)
+    kill_status: dict[str, dict] = {}
+
+    for strat, weight in allocations.items():
+        perf = performance.get(strat, {})
+        if perf.get("status") != "ok":
+            continue
+
+        trades = perf.get("total_trades", 0)
+        wr = perf.get("win_rate", 0.0)
+        total_pnl = perf.get("total_pnl", 0.0)
+        avg_pnl = perf.get("avg_pnl", 0.0)
+
+        if trades < KILL_SWITCH_MIN_TRADES:
+            continue
+
+        old_weight = weight
+        reason = None
+        adjustment = None
+
+        if wr < KILL_SWITCH_HARD_WR and total_pnl < 0:
+            adjusted[strat] = 0.0
+            reason = "hard_disable"
+            adjustment = "disabled"
+        elif wr < KILL_SWITCH_SOFT_WR and total_pnl < 0 and avg_pnl < 0:
+            adjusted[strat] = max(KILL_SWITCH_FLOOR, weight * 0.5)
+            reason = "soft_reduction"
+            adjustment = "reduced"
+
+        if reason:
+            kill_status[strat] = {
+                "active": True,
+                "reason": reason,
+                "adjustment": adjustment,
+            }
+            logger.info(
+                "STRATEGY KILL SWITCH | strategy=%s | reason=%s | old=%.2f | new=%.2f",
+                strat, reason, old_weight, adjusted[strat],
+            )
+
+    # Safety: if all disabled, revert to base
+    if all(w == 0.0 for w in adjusted.values()):
+        logger.info("STRATEGY KILL SWITCH | all_disabled → reverting to base")
+        return dict(allocations), {}
+
+    # Normalize non-zero weights
+    total = sum(adjusted.values())
+    if total > 0:
+        adjusted = {s: w / total for s, w in adjusted.items()}
+
+    return {s: round(w, 4) for s, w in adjusted.items()}, kill_status
