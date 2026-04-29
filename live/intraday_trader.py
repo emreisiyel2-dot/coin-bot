@@ -25,7 +25,7 @@ from core.fast_exit import evaluate_exit, evaluate_position_scaling
 from core.signal_score import score_signal, score_signal_short
 from core.alerts import send_alert
 from core.market_regime import apply_regime_filter, determine_market_regime
-from live.strategy_router import select_strategies
+from live.strategy_router import select_strategies, get_strategy_allocations
 from core.symbol_universe import filter_valid_symbols, get_symbols
 from indicators.feature_engine import compute_feature_snapshot
 from live.event_logger import EventLogger, capture_exception, write_dashboard_summary
@@ -674,6 +674,12 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
             active_strategies = select_strategies(market_regime["regime"])
         # else: active_strategies already set to [strategy_mode]
 
+        # ── Strategy capital allocation ─────────────────────────────────────────
+        strategy_allocs = get_strategy_allocations(
+            active_strategies, market_regime["regime"], strategy_mode)
+        logger.info("STRATEGY ALLOCATION | active=%s | allocations=%s",
+                    active_strategies, strategy_allocs)
+
         # ── Açık pozisyonlar: Fast Exit Engine ───────────────────────────────────
         for symbol in list(state["positions"].keys()):
             if symbol not in prices:
@@ -935,6 +941,26 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                         open_count += 1
                         continue
 
+                    # Allocation check
+                    alloc_limit = strategy_allocs.get(sm, 0.0) * equity
+                    alloc_used = sum(
+                        p["entry_price"] * p["quantity"]
+                        for p in state["positions"].values()
+                        if p.get("strategy") == sm
+                    )
+                    if alloc_used >= alloc_limit:
+                        logger.info(
+                            "ALLOCATION BLOCK | %s | strategy=%s | used=%.2f | limit=%.2f",
+                            symbol, sm, alloc_used, alloc_limit)
+                        evt.log_scan(symbol, "candidate_rejected",
+                                     reject_reason="allocation_exceeded",
+                                     timeframe=TIMEFRAME, strategy_mode=sm,
+                                     features=_feat, score_decision=_score,
+                                     checks={"strategy": sm,
+                                             "alloc_used": round(alloc_used, 2),
+                                             "alloc_limit": round(alloc_limit, 2)})
+                        continue
+
                     tl_before = len(state["trade_log"])
                     _open_position(state, symbol, prices[symbol], equity, now_str, evt=evt,
                                    strategy_name=sm, side=trade_side)
@@ -993,6 +1019,15 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
             extra_fields={
                 "strategy": strategy_mode,
                 "active_strategies": active_strategies,
+                "strategy_allocations": strategy_allocs,
+                "per_strategy_open_allocation": {
+                    sm: round(sum(
+                        p["entry_price"] * p["quantity"]
+                        for p in state["positions"].values()
+                        if p.get("strategy") == sm
+                    ), 2)
+                    for sm in active_strategies
+                },
                 "symbol_mode": symbol_mode,
                 "total_symbols_requested": len(symbols_requested),
                 "total_symbols_valid": len(symbols_valid),
