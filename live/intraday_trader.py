@@ -25,7 +25,8 @@ from core.fast_exit import evaluate_exit, evaluate_position_scaling
 from core.signal_score import score_signal, score_signal_short
 from core.alerts import send_alert
 from core.market_regime import apply_regime_filter, determine_market_regime
-from live.strategy_router import select_strategies, get_strategy_allocations
+from live.strategy_router import select_strategies, get_strategy_allocations, blend_allocations
+from live.strategy_performance import compute_strategy_performance
 from core.symbol_universe import filter_valid_symbols, get_symbols
 from indicators.feature_engine import compute_feature_snapshot
 from live.event_logger import EventLogger, capture_exception, write_dashboard_summary
@@ -674,9 +675,11 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
             active_strategies = select_strategies(market_regime["regime"])
         # else: active_strategies already set to [strategy_mode]
 
-        # ── Strategy capital allocation ─────────────────────────────────────────
-        strategy_allocs = get_strategy_allocations(
+        # ── Strategy capital allocation (adaptive) ───────────────────────────────
+        base_allocs = get_strategy_allocations(
             active_strategies, market_regime["regime"], strategy_mode)
+        strategy_perf = compute_strategy_performance(state.get("trade_log", []))
+        strategy_allocs = blend_allocations(base_allocs, strategy_perf)
         logger.info("STRATEGY ALLOCATION | active=%s | allocations=%s",
                     active_strategies, strategy_allocs)
 
@@ -1019,7 +1022,9 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
             extra_fields={
                 "strategy": strategy_mode,
                 "active_strategies": active_strategies,
+                "base_allocations": base_allocs,
                 "strategy_allocations": strategy_allocs,
+                "strategy_performance": strategy_perf,
                 "per_strategy_open_allocation": {
                     sm: round(sum(
                         p["entry_price"] * p["quantity"]
