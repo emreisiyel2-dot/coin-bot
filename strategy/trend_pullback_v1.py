@@ -1,37 +1,25 @@
 """
-Trend Pullback v1 — dual-direction pullback strategy.
+Trend Pullback v1 — long-only pullback strategy.
 
-Trades pullbacks inside an existing trend. Supports both long and short
-depending on trend direction and market regime.
+Captures pullbacks within an existing bullish trend.
+More frequent than momentum_pullback_v1 but still controlled.
 
-LONG setup (regime == bullish or neutral):
-  1. trend == bullish
+Entry rules LONG:
+  1. trend == "bullish"
   2. close > EMA200
-  3. distance_ema50_pct between -0.35 and +0.75
-  4. RSI between 40 and 58
-  5. ATR percentage >= 0.15
-  6. candle_body_pct <= 80
-  7. volume_spike_ratio >= 0.70
+  3. close > EMA50
+  4. distance_ema50_pct between -1.5 and +0.3
+  5. RSI between 40 and 60
+  6. volume_spike_ratio >= 0.9
+  7. atr_pct >= 0.15
+  8. candle_body_pct <= 80
 
-SHORT setup (regime == bearish or neutral):
-  1. trend == bearish
-  2. close < EMA200
-  3. distance_ema50_pct between -0.75 and +0.35
-  4. RSI between 42 and 62
-  5. ATR percentage >= 0.15
-  6. candle_body_pct <= 80
-  7. volume_spike_ratio >= 0.70
-
-Internal scoring:
-  base 0
-  +20 trend aligned
-  +20 near EMA50
-  +15 RSI in pullback range
-  +15 ATR adequate
-  +15 volume adequate
-  +15 candle acceptable
-
-Threshold: 70
+Scoring:
+  base score = 50 (all hard filters pass)
+  +10 if RSI between 45 and 55
+  +10 if volume_spike_ratio > 1.2
+  +10 if price just crossed above EMA50 (if data available)
+  Threshold: 55
 
 Paper trading only.
 """
@@ -44,32 +32,25 @@ from strategy.signals import Signal
 
 logger = logging.getLogger(__name__)
 
-TREND_PULLBACK_SCORE_MIN = 70
+TREND_PULLBACK_SCORE_MIN = 55
 
-# ── Long setup constants ──────────────────────────────────────────────────────
-LONG_DIST_EMA50_MIN = -0.35
-LONG_DIST_EMA50_MAX = 0.75
-LONG_RSI_MIN = 40.0
-LONG_RSI_MAX = 58.0
-
-# ── Short setup constants ─────────────────────────────────────────────────────
-SHORT_DIST_EMA50_MIN = -0.75
-SHORT_DIST_EMA50_MAX = 0.35
-SHORT_RSI_MIN = 42.0
-SHORT_RSI_MAX = 62.0
-
-# ── Shared constants ──────────────────────────────────────────────────────────
+# Hard filter constants
+DIST_EMA50_MIN = -1.5
+DIST_EMA50_MAX = 0.3
+DIST_EMA50_HARD_MAX = 1.0
+RSI_MIN = 40.0
+RSI_MAX = 60.0
+RSI_HARD_MIN = 35.0
+RSI_HARD_MAX = 65.0
 ATR_PCT_MIN = 0.15
 CANDLE_BODY_MAX_PCT = 80.0
-VOLUME_SPIKE_MIN = 0.70
+VOLUME_SPIKE_MIN = 0.9
 
-# ── Score weights ──────────────────────────────────────────────────────────────
-SCORE_TREND = 20
-SCORE_NEAR_EMA50 = 20
-SCORE_RSI = 15
-SCORE_ATR = 15
-SCORE_VOLUME = 15
-SCORE_CANDLE = 15
+# Bonus thresholds
+RSI_SWEET_MIN = 45.0
+RSI_SWEET_MAX = 55.0
+VOLUME_BONUS_THRESHOLD = 1.2
+BASE_SCORE = 50
 
 
 class TrendPullbackV1Strategy(BaseStrategy):
@@ -94,237 +75,164 @@ class TrendPullbackV1Strategy(BaseStrategy):
         self.last_decision = {}
 
         if not features:
-            self._set_decision("SKIP", 0, [], ["no_features"])
             self.last_rejection_reason = "no_features"
+            self._set_decision("SKIP", 0, [], ["no_features"])
             return Signal.HOLD
 
-        regime = (market_regime or {}).get("regime", "neutral")
-        long_result = self._evaluate_long(features, regime, symbol)
-        short_result = self._evaluate_short(features, regime, symbol)
+        return self._evaluate_long(features, symbol)
 
-        # Pick best passing setup, or none
-        candidates = []
-        if long_result["signal"] is not None:
-            candidates.append(long_result)
-        if short_result["signal"] is not None:
-            candidates.append(short_result)
+    def _evaluate_long(self, features: dict, symbol: str | None) -> Signal:
+        reasons: list[str] = []
+        rejects: list[str] = []
 
-        if not candidates:
-            # Both rejected — report the more relevant one
-            if regime == "bearish":
-                best = short_result
-            elif regime == "bullish":
-                best = long_result
-            else:
-                best = long_result if long_result["score"] >= short_result["score"] else short_result
+        # Pullback summary for logging
+        pullback = {
+            "distance_ema50_pct": features.get("distance_ema50_pct"),
+            "rsi": features.get("rsi"),
+            "volume_spike_ratio": features.get("volume_spike_ratio"),
+            "atr_pct": features.get("atr_pct"),
+        }
 
-            self.last_rejection_reason = best["reject_reasons"][0] if best["reject_reasons"] else "no_setup"
-            self.last_side = ""
-            self.last_score = best["score"]
-            self.last_decision = {
-                "action": "SKIP",
-                "side": "none",
-                "score": best["score"],
-                "threshold": TREND_PULLBACK_SCORE_MIN,
-                "reasons": best["reasons"],
-                "reject_reasons": best["reject_reasons"],
-            }
+        # 1. Trend
+        trend = features.get("trend", "neutral")
+        if trend != "bullish":
+            self.last_rejection_reason = "trend_not_bullish"
+            rejects.append("trend_not_bullish")
+            self._set_decision("SKIP", 0, reasons, rejects, pullback)
             return Signal.HOLD
 
-        # Pick highest scoring candidate
-        best = max(candidates, key=lambda c: c["score"])
-        if best["score"] < TREND_PULLBACK_SCORE_MIN:
-            self.last_rejection_reason = f"score_too_low ({best['score']} < {TREND_PULLBACK_SCORE_MIN})"
-            self.last_side = best["side"]
-            self.last_score = best["score"]
-            self.last_decision = {
-                "action": "SKIP",
-                "side": best["side"],
-                "score": best["score"],
-                "threshold": TREND_PULLBACK_SCORE_MIN,
-                "reasons": best["reasons"],
-                "reject_reasons": [self.last_rejection_reason],
-            }
+        close_price = features.get("close")
+        ema_200 = features.get("ema_200")
+        ema_50 = features.get("ema_50")
+
+        # 2. EMA200
+        if ema_200 is not None and close_price is not None and close_price <= ema_200:
+            self.last_rejection_reason = "price_below_ema200"
+            rejects.append("price_below_ema200")
+            self._set_decision("SKIP", 0, reasons, rejects, pullback)
+            return Signal.HOLD
+
+        # 3. EMA50
+        if ema_50 is not None and close_price is not None and close_price <= ema_50:
+            self.last_rejection_reason = "price_below_ema50"
+            rejects.append("price_below_ema50")
+            self._set_decision("SKIP", 0, reasons, rejects, pullback)
+            return Signal.HOLD
+
+        # Hard filters passed — start with base score
+        score = BASE_SCORE
+
+        # 4. Pullback zone (distance to EMA50)
+        dist_ema50 = features.get("distance_ema50_pct")
+        if dist_ema50 is None:
+            self.last_rejection_reason = "pullback_invalid"
+            rejects.append("pullback_invalid")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        if dist_ema50 > DIST_EMA50_HARD_MAX:
+            self.last_rejection_reason = "too_extended_from_ema50"
+            rejects.append("too_extended_from_ema50")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        if not (DIST_EMA50_MIN <= dist_ema50 <= DIST_EMA50_MAX):
+            self.last_rejection_reason = "pullback_invalid"
+            rejects.append("pullback_invalid")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        reasons.append("pullback_valid")
+
+        # 5. RSI
+        rsi = features.get("rsi")
+        if rsi is None or rsi < RSI_HARD_MIN or rsi > RSI_HARD_MAX:
+            self.last_rejection_reason = "rsi_out_of_range"
+            rejects.append("rsi_out_of_range")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        if not (RSI_MIN <= rsi <= RSI_MAX):
+            self.last_rejection_reason = "rsi_out_of_range"
+            rejects.append("rsi_out_of_range")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        reasons.append("rsi_in_range")
+        if RSI_SWEET_MIN <= rsi <= RSI_SWEET_MAX:
+            score += 10
+            reasons.append("rsi_sweet_spot")
+
+        # 6. Volume
+        vol_spike = features.get("volume_spike_ratio")
+        if vol_spike is None or vol_spike < VOLUME_SPIKE_MIN:
+            self.last_rejection_reason = "volume_too_weak"
+            rejects.append("volume_too_weak")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        reasons.append("volume_adequate")
+        if vol_spike > VOLUME_BONUS_THRESHOLD:
+            score += 10
+            reasons.append("volume_strong")
+
+        # 7. ATR
+        atr_pct = features.get("atr_pct")
+        if atr_pct is None or atr_pct < ATR_PCT_MIN:
+            self.last_rejection_reason = "atr_too_low"
+            rejects.append("atr_too_low")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        reasons.append("atr_adequate")
+
+        # 8. Candle body
+        candle_body = features.get("candle_body_pct")
+        if candle_body is not None and candle_body > CANDLE_BODY_MAX_PCT:
+            self.last_rejection_reason = "candle_too_large"
+            rejects.append("candle_too_large")
+            self._set_decision("SKIP", score, reasons, rejects, pullback)
+            return Signal.HOLD
+        reasons.append("candle_acceptable")
+
+        # 9. EMA50 cross bonus (safe — skip if data not available)
+        prev_close = features.get("previous_close")
+        if prev_close is not None and ema_50 is not None:
+            if prev_close <= ema_50 and close_price is not None and close_price > ema_50:
+                score += 10
+                reasons.append("crossed_above_ema50")
+
+        # Score gate
+        if score < TREND_PULLBACK_SCORE_MIN:
+            self.last_rejection_reason = f"score_too_low ({score} < {TREND_PULLBACK_SCORE_MIN})"
+            self.last_side = "long"
+            self.last_score = score
+            self._set_decision("SKIP", score, reasons, [self.last_rejection_reason], pullback)
             return Signal.HOLD
 
         # Signal accepted
-        signal = best["signal"]
-        self.last_side = best["side"]
-        self.last_score = best["score"]
+        self.last_side = "long"
+        self.last_score = score
         self.last_rejection_reason = ""
+        self.last_decision = {
+            "action": "BUY",
+            "side": "long",
+            "score": score,
+            "threshold": TREND_PULLBACK_SCORE_MIN,
+            "reasons": reasons,
+            "reject_reasons": [],
+            "pullback": pullback,
+        }
 
         logger.info(
-            "%s | %s | score=%d | rsi=%.1f dist_ema50=%.2f%% atr=%.3f%% vol=%.2fx body=%.0f%%",
-            "BUY" if signal == Signal.BUY else "SHORT",
-            symbol or "?", best["score"],
-            features.get("rsi", 0), features.get("distance_ema50_pct", 0),
-            features.get("atr_pct", 0), features.get("volume_spike_ratio", 0),
-            features.get("candle_body_pct", 0),
+            "BUY | %s | score=%d | rsi=%.1f dist=%.2f%% atr=%.3f%% vol=%.2fx body=%.0f%%",
+            symbol or "?", score, rsi, dist_ema50, atr_pct,
+            vol_spike or 0, candle_body or 0,
         )
-
-        self.last_decision = {
-            "action": "BUY" if signal == Signal.BUY else "SHORT",
-            "side": best["side"],
-            "score": best["score"],
-            "threshold": TREND_PULLBACK_SCORE_MIN,
-            "reasons": best["reasons"],
-            "reject_reasons": [],
-        }
-        return signal
-
-    def _evaluate_long(self, features: dict, regime: str, symbol: str | None) -> dict:
-        reasons: list[str] = []
-        rejects: list[str] = []
-        score = 0
-
-        # Regime gate
-        if regime == "bearish":
-            rejects.append("regime_too_bearish_for_long")
-            return {"signal": None, "side": "long", "score": 0,
-                    "reasons": reasons, "reject_reasons": rejects}
-
-        # Trend
-        trend = features.get("trend", "neutral")
-        if trend == "bullish":
-            score += SCORE_TREND
-            reasons.append("trend_aligned")
-        else:
-            rejects.append("trend_not_bullish")
-            return {"signal": None, "side": "long", "score": score,
-                    "reasons": reasons, "reject_reasons": rejects}
-
-        # EMA200
-        close_price = features.get("close")
-        ema_200 = features.get("ema_200")
-        if ema_200 is not None and close_price is not None and close_price <= ema_200:
-            rejects.append("price_below_ema200")
-            return {"signal": None, "side": "long", "score": score,
-                    "reasons": reasons, "reject_reasons": rejects}
-
-        # Distance to EMA50
-        dist_ema50 = features.get("distance_ema50_pct")
-        if dist_ema50 is not None and LONG_DIST_EMA50_MIN <= dist_ema50 <= LONG_DIST_EMA50_MAX:
-            score += SCORE_NEAR_EMA50
-            reasons.append("near_ema50")
-        else:
-            rejects.append("not_near_ema50")
-
-        # RSI
-        rsi = features.get("rsi")
-        if rsi is not None and LONG_RSI_MIN <= rsi <= LONG_RSI_MAX:
-            score += SCORE_RSI
-            reasons.append("rsi_in_range")
-        else:
-            rejects.append("rsi_out_of_pullback_range")
-
-        # ATR
-        atr_pct = features.get("atr_pct")
-        if atr_pct is not None and atr_pct >= ATR_PCT_MIN:
-            score += SCORE_ATR
-            reasons.append("atr_adequate")
-        else:
-            rejects.append("atr_too_low")
-
-        # Candle body
-        candle_body = features.get("candle_body_pct")
-        if candle_body is not None and candle_body <= CANDLE_BODY_MAX_PCT:
-            score += SCORE_CANDLE
-            reasons.append("candle_acceptable")
-        else:
-            rejects.append("candle_too_large")
-
-        # Volume
-        vol_spike = features.get("volume_spike_ratio")
-        if vol_spike is not None and vol_spike >= VOLUME_SPIKE_MIN:
-            score += SCORE_VOLUME
-            reasons.append("volume_adequate")
-        else:
-            rejects.append("volume_too_weak")
-
-        signal = Signal.BUY if score >= TREND_PULLBACK_SCORE_MIN else None
-        return {"signal": signal, "side": "long", "score": score,
-                "reasons": reasons, "reject_reasons": rejects}
-
-    def _evaluate_short(self, features: dict, regime: str, symbol: str | None) -> dict:
-        reasons: list[str] = []
-        rejects: list[str] = []
-        score = 0
-
-        # Regime gate
-        if regime == "bullish":
-            rejects.append("regime_too_bullish_for_short")
-            return {"signal": None, "side": "short", "score": 0,
-                    "reasons": reasons, "reject_reasons": rejects}
-
-        # Trend
-        trend = features.get("trend", "neutral")
-        if trend == "bearish":
-            score += SCORE_TREND
-            reasons.append("trend_aligned")
-        else:
-            rejects.append("trend_not_bearish")
-            return {"signal": None, "side": "short", "score": score,
-                    "reasons": reasons, "reject_reasons": rejects}
-
-        # EMA200
-        close_price = features.get("close")
-        ema_200 = features.get("ema_200")
-        if ema_200 is not None and close_price is not None and close_price >= ema_200:
-            rejects.append("price_above_ema200")
-            return {"signal": None, "side": "short", "score": score,
-                    "reasons": reasons, "reject_reasons": rejects}
-
-        # Distance to EMA50
-        dist_ema50 = features.get("distance_ema50_pct")
-        if dist_ema50 is not None and SHORT_DIST_EMA50_MIN <= dist_ema50 <= SHORT_DIST_EMA50_MAX:
-            score += SCORE_NEAR_EMA50
-            reasons.append("near_ema50")
-        else:
-            rejects.append("not_near_ema50")
-
-        # RSI
-        rsi = features.get("rsi")
-        if rsi is not None and SHORT_RSI_MIN <= rsi <= SHORT_RSI_MAX:
-            score += SCORE_RSI
-            reasons.append("rsi_in_range")
-        else:
-            rejects.append("rsi_out_of_pullback_range")
-
-        # ATR
-        atr_pct = features.get("atr_pct")
-        if atr_pct is not None and atr_pct >= ATR_PCT_MIN:
-            score += SCORE_ATR
-            reasons.append("atr_adequate")
-        else:
-            rejects.append("atr_too_low")
-
-        # Candle body
-        candle_body = features.get("candle_body_pct")
-        if candle_body is not None and candle_body <= CANDLE_BODY_MAX_PCT:
-            score += SCORE_CANDLE
-            reasons.append("candle_acceptable")
-        else:
-            rejects.append("candle_too_large")
-
-        # Volume
-        vol_spike = features.get("volume_spike_ratio")
-        if vol_spike is not None and vol_spike >= VOLUME_SPIKE_MIN:
-            score += SCORE_VOLUME
-            reasons.append("volume_adequate")
-        else:
-            rejects.append("volume_too_weak")
-
-        signal = Signal.SHORT if score >= TREND_PULLBACK_SCORE_MIN else None
-        return {"signal": signal, "side": "short", "score": score,
-                "reasons": reasons, "reject_reasons": rejects}
+        return Signal.BUY
 
     def _set_decision(self, action: str, score: int,
-                      reasons: list[str], reject_reasons: list[str]) -> None:
+                      reasons: list[str], reject_reasons: list[str],
+                      pullback: dict | None = None) -> None:
         self.last_decision = {
             "action": action,
-            "side": "none",
+            "side": "long" if action == "BUY" else "none",
             "score": score,
             "threshold": TREND_PULLBACK_SCORE_MIN,
             "reasons": reasons,
             "reject_reasons": reject_reasons,
+            "pullback": pullback or {},
         }

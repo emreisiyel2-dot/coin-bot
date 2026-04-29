@@ -32,6 +32,12 @@ BUY_SCORE_THRESHOLD      = 60
 HIGH_CONFIDENCE_MIN      = 75
 MEDIUM_CONFIDENCE_MIN    = 50
 
+# ── Short-aware scoring thresholds ─────────────────────────────────────────
+SHORT_SCORE_MIN_TO_TRADE = 60
+SHORT_VOLUME_SPIKE_MIN   = 1.0
+SHORT_ATR_PCT_MIN        = 0.18
+SHORT_RSI_MAX            = 45.0
+
 
 def score_signal(features: dict[str, Any]) -> dict[str, Any]:
     """
@@ -128,6 +134,124 @@ def score_signal(features: dict[str, Any]) -> dict[str, Any]:
         confidence = "medium"
     else:
         confidence = "low"
+
+    result["action"] = action
+    result["score"] = score
+    result["confidence"] = confidence
+    result["reasons"] = reasons
+    result["reject_reasons"] = reject_reasons
+
+    return result
+
+
+def score_signal_short(
+    features: dict[str, Any],
+    market_regime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Short-aware scoring for short_momentum_v1.
+
+    Returns:
+        {
+            "score_model": "short_aware",
+            "action": "SHORT" | "SKIP",
+            "score": 0-100,
+            "confidence": "low" | "medium" | "high",
+            "reasons": [...],
+            "reject_reasons": [...]
+        }
+    """
+    result: dict[str, Any] = {
+        "score_model": "short_aware",
+        "action":       "SKIP",
+        "score":        0,
+        "confidence":   "low",
+        "reasons":      [],
+        "reject_reasons": [],
+    }
+
+    if features.get("close") is None:
+        result["reject_reasons"].append("insufficient feature data")
+        return result
+
+    score = 0
+    reasons: list[str] = []
+    reject_reasons: list[str] = []
+
+    trend = features.get("trend", "neutral")
+    rsi = features.get("rsi")
+    vol_spike = features.get("volume_spike_ratio")
+    atr_pct = features.get("atr_pct")
+    candle_body = features.get("candle_body_pct")
+    close = features.get("close")
+    ema200 = features.get("ema_200")
+    ema50 = features.get("ema_50")
+
+    # ── Market regime ──────────────────────────────────────────────────────
+    regime = (market_regime or {}).get("regime", "neutral")
+    if regime == "bearish":
+        score += 20
+        reasons.append("market regime bearish")
+    else:
+        reject_reasons.append(f"market regime not bearish ({regime})")
+
+    # ── Trend ──────────────────────────────────────────────────────────────
+    if trend == "bearish":
+        score += 20
+        reasons.append("trend bearish (close below EMA200)")
+    else:
+        reject_reasons.append(f"trend not bearish ({trend})")
+
+    # ── Price below EMA200 ─────────────────────────────────────────────────
+    if close is not None and ema200 is not None and close < ema200:
+        score += 15
+        reasons.append("close below EMA200")
+    elif close is not None and ema200 is not None:
+        reject_reasons.append("close above EMA200")
+
+    # ── Price below EMA50 ──────────────────────────────────────────────────
+    if close is not None and ema50 is not None and close < ema50:
+        score += 15
+        reasons.append("close below EMA50")
+    elif close is not None and ema50 is not None:
+        reject_reasons.append("close above EMA50")
+
+    # ── Volume spike ───────────────────────────────────────────────────────
+    if vol_spike is not None and vol_spike >= SHORT_VOLUME_SPIKE_MIN:
+        score += 15
+        reasons.append(f"volume spike {vol_spike:.2f}x >= {SHORT_VOLUME_SPIKE_MIN}")
+    elif vol_spike is not None:
+        reject_reasons.append(f"volume too low ({vol_spike:.2f}x < {SHORT_VOLUME_SPIKE_MIN})")
+
+    # ── ATR ────────────────────────────────────────────────────────────────
+    if atr_pct is not None and atr_pct >= SHORT_ATR_PCT_MIN:
+        score += 10
+        reasons.append(f"ATR {atr_pct:.3f}% >= {SHORT_ATR_PCT_MIN}%")
+    elif atr_pct is not None:
+        reject_reasons.append(f"ATR too low ({atr_pct:.3f}% < {SHORT_ATR_PCT_MIN}%)")
+
+    # ── RSI in short-favorable zone ────────────────────────────────────────
+    if rsi is not None and 30.0 <= rsi <= SHORT_RSI_MAX:
+        score += 10
+        reasons.append(f"RSI in short zone ({rsi:.1f})")
+    elif rsi is not None:
+        reject_reasons.append(f"RSI outside short zone ({rsi:.1f})")
+
+    # ── Candle body not full-range ─────────────────────────────────────────
+    if candle_body is not None and candle_body <= 75.0:
+        score += 5
+        reasons.append(f"candle body ok ({candle_body:.1f}%)")
+
+    # ── Confidence ─────────────────────────────────────────────────────────
+    if score >= HIGH_CONFIDENCE_MIN:
+        confidence = "high"
+    elif score >= MEDIUM_CONFIDENCE_MIN:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    action = "SHORT" if score >= SHORT_SCORE_MIN_TO_TRADE else "SKIP"
+    if action == "SKIP" and score < SHORT_SCORE_MIN_TO_TRADE:
+        reject_reasons.append(f"score below threshold ({score} < {SHORT_SCORE_MIN_TO_TRADE})")
 
     result["action"] = action
     result["score"] = score

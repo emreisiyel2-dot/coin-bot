@@ -189,7 +189,7 @@ def write_dashboard_summary(
     today_scans = [s for s in scans if s.get("ts", "").startswith(today)]
 
     # Per-bot stats
-    bots = ["breakout_v2", "rsi_reversion", "short_momentum_v1", "momentum_pullback_v1"]
+    bots = ["breakout_v2", "rsi_reversion", "short_momentum_v1", "momentum_pullback_v1", "trend_pullback_v1"]
     bot_summaries = {}
     for bot in bots:
         bot_scans = [s for s in today_scans if s.get("bot") == bot]
@@ -306,6 +306,30 @@ def write_dashboard_summary(
             "rejected": len([s for s in short_scans if s.get("signal_state") == "candidate_rejected"]),
             "no_signal": len([s for s in short_scans if s.get("signal_state") == "no_signal"]),
             "top_reject_reasons": dict(sorted(short_reject_reasons.items(), key=lambda x: -x[1])[:5]),
+        }
+
+        # Trend pullback v1 summary
+        tp_scans = [s for s in today_scans if s.get("bot") == "trend_pullback_v1"]
+        tp_reject_reasons = {}
+        tp_long_accepted = 0
+        tp_short_accepted = 0
+        for s in tp_scans:
+            if s.get("signal_state") == "candidate_rejected":
+                reason = s.get("reject_reason", "unknown")
+                tp_reject_reasons[reason] = tp_reject_reasons.get(reason, 0) + 1
+            if s.get("signal_state") == "signal_accepted":
+                side = s.get("side") or s.get("checks", {}).get("side", "")
+                if side == "long":
+                    tp_long_accepted += 1
+                elif side == "short":
+                    tp_short_accepted += 1
+        summary["trend_pullback_v1_summary"] = {
+            "accepted": len([s for s in tp_scans if s.get("signal_state") == "signal_accepted"]),
+            "long_candidates": tp_long_accepted,
+            "short_candidates": tp_short_accepted,
+            "rejected": len([s for s in tp_scans if s.get("signal_state") == "candidate_rejected"]),
+            "no_signal": len([s for s in tp_scans if s.get("signal_state") == "no_signal"]),
+            "top_reject_reasons": dict(sorted(tp_reject_reasons.items(), key=lambda x: -x[1])[:5]),
         }
 
     if extra_fields:

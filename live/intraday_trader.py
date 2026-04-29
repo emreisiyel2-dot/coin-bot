@@ -13,6 +13,7 @@ Kullanım:
 import argparse
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,7 +22,7 @@ import pandas as pd
 
 from config.settings import RSI_REVERSION_CONFIG
 from core.fast_exit import evaluate_exit, evaluate_position_scaling
-from core.signal_score import score_signal
+from core.signal_score import score_signal, score_signal_short
 from core.alerts import send_alert
 from core.market_regime import apply_regime_filter, determine_market_regime
 from core.symbol_universe import filter_valid_symbols, get_symbols
@@ -451,6 +452,7 @@ def _partial_close_position(
         "price": price, "quantity": round(close_qty, 8),
         "pnl": round(pnl, 4), "exit_pct": exit_pct,
         "reason": reason, "strategy": pos.get("strategy", "rsi_reversion"),
+        "side": "short" if is_short else "long",
     })
     send_alert("PARTIAL_CLOSE", {"symbol": symbol,
                "strategy": pos.get("strategy", "rsi_reversion"),
@@ -653,6 +655,13 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
         # Determine market regime from BTC/ETH features
         market_regime = determine_market_regime(features_map)
+
+        # Re-score with short-aware model for short_momentum_v1
+        if is_short_mode:
+            for sym in list(scores_map.keys()):
+                scores_map[sym] = score_signal_short(
+                    features_map[sym], market_regime=market_regime)
+
         logger.info(
             "MARKET REGIME | %s (conf=%d) | symbols_scanned=%d | liquidity_blocked=%d",
             market_regime["regime"], market_regime["confidence"],
@@ -666,7 +675,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
             state["peak_equity"] = equity
 
         if status_only:
-            _print_status(state, prices, equity, APPROVED_SYMBOLS)
+            _print_status(state, prices, equity, APPROVED_SYMBOLS,
+                          strategy_mode=strategy_mode)
             return
 
         # ── Açık pozisyonlar: Fast Exit Engine ───────────────────────────────────
@@ -818,6 +828,7 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                                  checks={"market_regime": market_regime.get("regime"),
                                          "regime_confidence": market_regime.get("confidence")})
                     continue
+            # trend_pullback_v1: no external regime filter — strategy handles it internally
 
             bars_loaded = len(candles[symbol])
 
@@ -828,6 +839,10 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
             elif strategy_mode == "short_momentum_v1":
                 signal = strategy.generate_signal(
                     symbol=symbol, features=_feat, score_decision=_score)
+            elif strategy_mode == "trend_pullback_v1":
+                signal = strategy.generate_signal(
+                    symbol=symbol, features=_feat, score_decision=_score,
+                    market_regime=market_regime)
             else:
                 min_bars_required = max(
                     EMA_TREND_PERIOD + 1,
@@ -847,39 +862,51 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                                  checks={"bars_ok": False})
                     continue
 
-            if signal in (Signal.BUY, Signal.SELL):
-                score_val = _score.get("score", 0)
-                score_threshold = (SCORE_MIN_TO_TRADE_MOMENTUM
-                                   if strategy_mode == "momentum_pullback_v1"
-                                   else SCORE_MIN_TO_TRADE)
-                if score_val < score_threshold:
-                    evt.log_scan(symbol, "candidate_rejected",
-                                 reject_reason="score_below_trade_threshold",
-                                 bars_loaded=bars_loaded,
-                                 timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                                 features=_feat, score_decision=_score,
-                                 score_used_for_trade=False,
-                                 score_threshold_used=score_threshold,
-                                 checks={"strategy_signal": signal.value,
-                                         "score": score_val,
-                                         "threshold": score_threshold})
-                    logger.info("SCORE BLOCK | %s | score=%d < threshold=%d (%s)",
-                                symbol, score_val, score_threshold, strategy_mode)
-                    continue
+            if signal in (Signal.BUY, Signal.SELL, Signal.SHORT):
+                is_short_signal = signal in (Signal.SELL, Signal.SHORT)
+                trade_side = "short" if is_short_signal else "long"
 
-                signal_label = "SHORT" if signal == Signal.SELL else "BUY"
+                # Score check — skip for trend_pullback_v1 (uses internal scoring)
+                if strategy_mode != "trend_pullback_v1":
+                    score_val = _score.get("score", 0)
+                    score_threshold = (SCORE_MIN_TO_TRADE_MOMENTUM
+                                       if strategy_mode == "momentum_pullback_v1"
+                                       else SCORE_MIN_TO_TRADE)
+                    if score_val < score_threshold:
+                        evt.log_scan(symbol, "candidate_rejected",
+                                     reject_reason="score_below_trade_threshold",
+                                     bars_loaded=bars_loaded,
+                                     timeframe=TIMEFRAME, strategy_mode=strategy_mode,
+                                     features=_feat, score_decision=_score,
+                                     score_used_for_trade=False,
+                                     score_threshold_used=score_threshold,
+                                     checks={"strategy_signal": signal.value,
+                                             "score": score_val,
+                                             "threshold": score_threshold})
+                        logger.info("SCORE BLOCK | %s | score=%d < threshold=%d (%s)",
+                                    symbol, score_val, score_threshold, strategy_mode)
+                        continue
+                else:
+                    score_val = getattr(strategy, "last_score", 0)
+                    score_threshold = TREND_PULLBACK_SCORE_MIN
+
+                signal_label = "SHORT" if is_short_signal else "BUY"
+                # Include strategy's internal decision for trend_pullback_v1
+                tp_decision = getattr(strategy, "last_decision", {})
+
                 evt.log_scan(symbol, "signal_accepted",
                              bars_loaded=bars_loaded,
                              timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             side="short" if signal == Signal.SELL else "long",
+                             side=trade_side,
                              market_regime=market_regime,
                              features=_feat, score_decision=_score,
                              score_used_for_trade=True,
                              score_threshold_used=score_threshold,
+                             decision=tp_decision if strategy_mode == "trend_pullback_v1" else None,
                              checks={"strategy_signal": signal_label,
                                      "score": score_val,
                                      "threshold": score_threshold,
-                                     "side": "short" if signal == Signal.SELL else "long"})
+                                     "side": trade_side})
 
                 if dry_run:
                     logger.info("DRY-RUN | %s | would %s @ %.4f (skipped)",
@@ -889,7 +916,7 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
                 tl_before = len(state["trade_log"])
                 _open_position(state, symbol, prices[symbol], equity, now_str, evt=evt,
-                               strategy_name=strategy_mode)
+                               strategy_name=strategy_mode, side=trade_side)
                 open_count += 1
                 if len(state["trade_log"]) > tl_before:
                     e = state["trade_log"][-1]
@@ -898,11 +925,15 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                                   size_usdt=e.get("size_usdt"), strategy=strategy_mode)
             else:
                 reason = getattr(strategy, "last_rejection_reason", "")
+                tp_decision = getattr(strategy, "last_decision", {})
                 evt.log_scan(symbol, "no_signal" if not reason else "candidate_rejected",
                              reject_reason=reason or None,
                              bars_loaded=bars_loaded,
                              timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             features=_feat, score_decision=_score)
+                             side=getattr(strategy, "last_side", "") or "none",
+                             market_regime=market_regime,
+                             features=_feat, score_decision=_score,
+                             decision=tp_decision if strategy_mode == "trend_pullback_v1" else None)
 
         equity = _total_equity(state, prices)
         if equity > state["peak_equity"]:
@@ -918,7 +949,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         })
 
         _save_state(state)
-        _print_status(state, prices, equity, APPROVED_SYMBOLS)
+        _print_status(state, prices, equity, APPROVED_SYMBOLS,
+                      strategy_mode=strategy_mode)
 
         evt.log_run("completed",
                     symbols_scanned=len(candles),
@@ -937,6 +969,7 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
         write_dashboard_summary(
             extra_fields={
+                "strategy": strategy_mode,
                 "symbol_mode": symbol_mode,
                 "total_symbols_requested": len(symbols_requested),
                 "total_symbols_valid": len(symbols_valid),
@@ -970,7 +1003,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 # ── Durum raporu ──────────────────────────────────────────────────────────────
 
 def _print_status(state: dict, prices: dict[str, float], equity: float,
-                  symbols: list[str] | None = None) -> None:
+                  symbols: list[str] | None = None,
+                  strategy_mode: str = "rsi_reversion") -> None:
     alloc  = allocated_usdt(state["positions"])
     u_pnl  = unrealized_pnl(state["positions"], prices)
     guard  = check_daily_loss_guard(
@@ -985,7 +1019,7 @@ def _print_status(state: dict, prices: dict[str, float], equity: float,
     total_closed = len([t for t in trade_log if t["action"] == "CLOSE"])
 
     print("\n" + "═" * 62)
-    print("  INTRADAY TRADER — RSI_REVERSION / 15M")
+    print(f"  INTRADAY TRADER — {strategy_mode.upper()} / 15M")
     print("═" * 62)
     print(f"  Zaman          : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
     print(f"  Cash           : {state['cash']:>10,.2f} USDT")
@@ -1032,24 +1066,76 @@ def _print_status(state: dict, prices: dict[str, float], equity: float,
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+# ── Loop mode ──────────────────────────────────────────────────────────────────
+
+def _run_loop(strategy_mode: str, dry_run: bool, symbol_mode: str, interval: int) -> None:
+    """Run scan/trade cycle continuously with sleep between cycles."""
+    print(f"\n  LOOP MODE ENABLED | strategy={strategy_mode} | symbols={symbol_mode} | interval={interval}s")
+    print(f"  Paper trading only. Press Ctrl+C to stop.\n")
+
+    cycle = 0
+    try:
+        while True:
+            cycle += 1
+            cycle_start = time.monotonic()
+            logger.info("LOOP CYCLE #%d | strategy=%s | interval=%ds", cycle, strategy_mode, interval)
+
+            try:
+                run(strategy_mode=strategy_mode, dry_run=dry_run, symbol_mode=symbol_mode)
+            except Exception as exc:
+                logger.error("LOOP CYCLE #%d ERROR | %s — continuing", cycle, exc)
+
+            elapsed = time.monotonic() - cycle_start
+            sleep_sec = max(0, interval - elapsed)
+
+            # Update dashboard with loop status
+            try:
+                dashboard_path = Path(__file__).parent.parent / "logs" / "dashboard_summary.json"
+                if dashboard_path.exists():
+                    d = json.loads(dashboard_path.read_text())
+                    d["loop_mode"] = True
+                    d["loop_interval_sec"] = interval
+                    d["loop_cycle"] = cycle
+                    d["last_loop_run"] = datetime.now(timezone.utc).isoformat()
+                    with open(dashboard_path, "w") as f:
+                        json.dump(d, f, indent=2, default=str)
+            except Exception:
+                pass
+
+            if sleep_sec > 0:
+                logger.info("LOOP SLEEP | %.0fs until next cycle", sleep_sec)
+                time.sleep(sleep_sec)
+    except KeyboardInterrupt:
+        print(f"\n  Loop stopped by user after {cycle} cycle(s).")
+        logger.info("LOOP STOPPED | %d cycles completed", cycle)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="intraday paper trader")
     p.add_argument("--status", action="store_true", help="Sadece durum göster")
     p.add_argument("--reset", action="store_true", help="State'i sıfırla (başlangıç capitaline dön)")
     p.add_argument("--strategy", default=INTRADAY_STRATEGY_MODE,
-                   choices=("rsi_reversion", "momentum_pullback_v1", "short_momentum_v1"),
+                   choices=("rsi_reversion", "momentum_pullback_v1", "short_momentum_v1", "trend_pullback_v1"),
                    help=f"Strategy mode (default: {INTRADAY_STRATEGY_MODE})")
     p.add_argument("--dry-run", action="store_true",
                    help="Scan and log decisions but do NOT open trades")
     p.add_argument("--symbols", default=DEFAULT_SYMBOL_MODE,
                    choices=("core", "expanded", "dynamic"),
                    help=f"Symbol universe: 'core' (4), 'expanded' (13), or 'dynamic' (40). Default: {DEFAULT_SYMBOL_MODE}")
+    p.add_argument("--loop", action="store_true",
+                   help="Run continuously in loop mode until Ctrl+C")
+    p.add_argument("--interval", type=int, default=60,
+                   help="Seconds between loop cycles (default: 60)")
     args = p.parse_args()
     if args.reset:
         _reset_state()
         return
-    run(status_only=args.status, strategy_mode=args.strategy,
-        dry_run=args.dry_run, symbol_mode=args.symbols)
+    if args.loop:
+        _run_loop(strategy_mode=args.strategy, dry_run=args.dry_run,
+                  symbol_mode=args.symbols, interval=args.interval)
+    else:
+        run(status_only=args.status, strategy_mode=args.strategy,
+            dry_run=args.dry_run, symbol_mode=args.symbols)
 
 
 if __name__ == "__main__":
