@@ -26,7 +26,7 @@ from core.signal_score import score_signal, score_signal_short
 from core.alerts import send_alert
 from core.market_regime import apply_regime_filter, determine_market_regime
 from live.strategy_router import select_strategies, get_strategy_allocations, blend_allocations, apply_kill_switch
-from live.strategy_performance import compute_strategy_performance
+from live.strategy_performance import compute_strategy_performance, compute_symbol_performance, get_blocked_symbols
 from core.symbol_universe import filter_valid_symbols, get_symbols
 from indicators.feature_engine import compute_feature_snapshot
 from live.event_logger import EventLogger, capture_exception, write_dashboard_summary
@@ -679,6 +679,12 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         base_allocs = get_strategy_allocations(
             active_strategies, market_regime["regime"], strategy_mode)
         strategy_perf = compute_strategy_performance(state.get("trade_log", []))
+        symbol_perf = compute_symbol_performance(state.get("trade_log", []))
+        blocked_symbols = get_blocked_symbols(symbol_perf)
+        if blocked_symbols:
+            total_blocked = sum(len(v) for v in blocked_symbols.values())
+            logger.info("SYMBOL PERFORMANCE FILTER | %d symbol(s) blocked across %d strategy(ies)",
+                        total_blocked, len(blocked_symbols))
         blended = blend_allocations(base_allocs, strategy_perf)
         strategy_allocs, kill_switch_status = apply_kill_switch(blended, strategy_perf)
         logger.info("STRATEGY ALLOCATION | active=%s | allocations=%s",
@@ -965,6 +971,25 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                                              "alloc_limit": round(alloc_limit, 2)})
                         continue
 
+                    # Symbol-level performance block (applies in all modes including manual)
+                    sym_stats = symbol_perf.get(sm, {}).get(symbol)
+                    if sym_stats and sym_stats.get("status") == "blocked":
+                        logger.info(
+                            "SYMBOL PERFORMANCE BLOCK | strategy=%s | symbol=%s | "
+                            "trades=%d | wr=%.1f%% | pnl=%.2f",
+                            sm, symbol,
+                            sym_stats["total_trades"],
+                            sym_stats["win_rate"] * 100,
+                            sym_stats["total_pnl"],
+                        )
+                        evt.log_scan(symbol, "candidate_rejected",
+                                     reject_reason="symbol_performance_blocked",
+                                     timeframe=TIMEFRAME, strategy_mode=sm,
+                                     features=_feat, score_decision=_score,
+                                     checks={"strategy": sm,
+                                             "symbol_performance": sym_stats})
+                        continue
+
                     tl_before = len(state["trade_log"])
                     _open_position(state, symbol, prices[symbol], equity, now_str, evt=evt,
                                    strategy_name=sm, side=trade_side)
@@ -1055,6 +1080,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                     "long_closed": len([t for t in long_trades if t.get("action") == "CLOSE"]),
                     "short_closed": len([t for t in short_trades if t.get("action") == "CLOSE"]),
                 },
+                "symbol_performance": symbol_perf,
+                "blocked_symbols": blocked_symbols,
             }
         )
 

@@ -3,6 +3,9 @@ Strategy Performance Tracker — observer mode.
 
 Analyzes closed trades per strategy and produces suggested weights.
 Does NOT modify allocation or trading behavior.
+
+Also provides symbol-level performance filtering:
+per-strategy + per-symbol stats with blocking for persistently bad pairs.
 """
 
 import logging
@@ -11,6 +14,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MIN_TRADES_FOR_SUGGESTION = 10
+MIN_TRADES_FOR_SYMBOL_BLOCK = 8
 
 
 def compute_strategy_performance(trades: list[dict]) -> dict[str, dict[str, Any]]:
@@ -105,3 +109,71 @@ def _compute_suggested_weight(win_rate: float, total_pnl: float) -> float:
         weight = 0.3
 
     return round(max(0.2, min(0.8, weight)), 2)
+
+
+def compute_symbol_performance(trades: list[dict]) -> dict[str, dict[str, dict[str, Any]]]:
+    """Compute per-strategy + per-symbol performance from closed trades.
+
+    Returns nested dict: {strategy_name: {symbol: {stats}}}.
+
+    Status logic:
+      - total_trades < 8  → "insufficient_data"
+      - win_rate < 0.35 AND total_pnl < 0 AND avg_pnl < 0 → "blocked"
+      - otherwise          → "ok"
+    """
+    by_pair: dict[str, dict[str, list[dict]]] = {}
+    for t in trades:
+        if t.get("action") != "CLOSE":
+            continue
+        strat = t.get("strategy", "unknown")
+        sym = t.get("symbol", "unknown")
+        by_pair.setdefault(strat, {}).setdefault(sym, []).append(t)
+
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+
+    for strat, symbols in by_pair.items():
+        result[strat] = {}
+        for sym, closed in symbols.items():
+            total = len(closed)
+            wins = sum(1 for t in closed if t.get("pnl", 0) > 0)
+            losses = total - wins
+            win_rate = wins / total if total > 0 else 0.0
+            total_pnl = sum(t.get("pnl", 0) for t in closed)
+            avg_pnl = total_pnl / total if total > 0 else 0.0
+
+            if total < MIN_TRADES_FOR_SYMBOL_BLOCK:
+                status = "insufficient_data"
+            elif win_rate < 0.35 and total_pnl < 0 and avg_pnl < 0:
+                status = "blocked"
+            else:
+                status = "ok"
+
+            result[strat][sym] = {
+                "total_trades": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(win_rate, 4),
+                "total_pnl": round(total_pnl, 4),
+                "avg_pnl": round(avg_pnl, 4),
+                "status": status,
+            }
+
+            if status == "blocked":
+                logger.info(
+                    "SYMBOL PERFORMANCE BLOCK | strategy=%s | symbol=%s | "
+                    "trades=%d | wr=%.1f%% | pnl=%.2f",
+                    strat, sym, total, win_rate * 100, total_pnl,
+                )
+
+    return result
+
+
+def get_blocked_symbols(
+    symbol_perf: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, list[str]]:
+    """Extract blocked symbol lists per strategy from symbol performance data."""
+    blocked: dict[str, list[str]] = {}
+    for strat, symbols in symbol_perf.items():
+        blocked[strat] = [sym for sym, stats in symbols.items()
+                          if stats.get("status") == "blocked"]
+    return blocked
