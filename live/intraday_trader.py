@@ -1092,6 +1092,13 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         short_pnl = sum(t.get("pnl", 0) for t in short_trades if t.get("action") == "CLOSE")
         long_pnl = sum(t.get("pnl", 0) for t in long_trades if t.get("action") == "CLOSE")
 
+        scanner_dash = _build_scanner_dashboard(
+            candles=candles, features_map=features_map, scores_map=scores_map,
+            prices=prices, positions=state["positions"], market_regime=market_regime,
+            active_strategies=active_strategies, approved_symbols=APPROVED_SYMBOLS,
+            symbol_perf=symbol_perf, blocked_symbols=blocked_symbols,
+        )
+
         write_dashboard_summary(
             extra_fields={
                 "strategy": strategy_mode,
@@ -1130,6 +1137,7 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
                 },
                 "symbol_performance": symbol_perf,
                 "blocked_symbols": blocked_symbols,
+                "scanner_dashboard": scanner_dash,
             }
         )
 
@@ -1138,6 +1146,126 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         evt.log_run("error", error=str(exc), duration_sec=evt.elapsed())
         send_alert("ERROR", {"reason": str(exc)})
         raise
+
+
+# ── Scanner dashboard builder ─────────────────────────────────────────────────
+
+def _build_scanner_dashboard(
+    candles: dict[str, "pd.DataFrame"],
+    features_map: dict[str, dict],
+    scores_map: dict[str, dict],
+    prices: dict[str, float],
+    positions: dict[str, dict],
+    market_regime: dict,
+    active_strategies: list[str],
+    approved_symbols: list[str],
+    symbol_perf: dict,
+    blocked_symbols: dict[str, list[str]],
+) -> dict:
+    """Build scanner_dashboard data from already-loaded scan data."""
+    symbol_entries = []
+    scan_counts = {
+        "total_scanned": 0,
+        "open_positions": 0,
+        "accepted_signals": 0,
+        "blocked_signals": 0,
+        "no_signal": 0,
+    }
+
+    for symbol in approved_symbols:
+        if symbol not in candles:
+            continue
+
+        feat = features_map.get(symbol, {})
+        score = scores_map.get(symbol, {})
+        price = prices.get(symbol, 0)
+        pos = positions.get(symbol)
+
+        scan_counts["total_scanned"] += 1
+
+        # Sparkline: last 20 close prices
+        df = candles[symbol]
+        sparkline = [round(float(v), 4) for v in df["close"].iloc[-20:].tolist()]
+
+        # Feature metrics
+        atr_pct = feat.get("atr_pct")
+        rsi = feat.get("rsi")
+        vol_sma = feat.get("volume_sma")
+        volume_ratio = None
+        if vol_sma and vol_sma > 0:
+            last_vol = feat.get("volume")
+            if last_vol:
+                volume_ratio = round(last_vol / vol_sma, 2)
+
+        entry = {
+            "symbol": symbol,
+            "last_price": round(price, 4),
+            "market_regime": market_regime.get("regime"),
+            "active_strategies": active_strategies,
+            "score": score.get("score"),
+            "signal": None,
+            "last_scan_result": "scanned",
+            "reject_reason": None,
+            "sparkline": sparkline,
+            "atr_pct": round(atr_pct, 4) if atr_pct is not None else None,
+            "rsi": round(rsi, 2) if rsi is not None else None,
+            "volume_ratio": volume_ratio,
+            "has_capital": False,
+        }
+
+        if pos is not None:
+            scan_counts["open_positions"] += 1
+            side = pos.get("side", "long")
+            is_short = side == "short"
+            entry_price = pos.get("entry_price", 0)
+            unrealized_pnl = (entry_price - price) * pos.get("quantity", 0) if is_short else (price - entry_price) * pos.get("quantity", 0)
+            unrealized_pct = ((entry_price - price) / entry_price * 100) if is_short and entry_price > 0 else ((price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+
+            entry.update({
+                "status": "open_position",
+                "has_capital": True,
+                "side": side,
+                "strategy": pos.get("strategy"),
+                "entry_price": round(entry_price, 4),
+                "current_price": round(price, 4),
+                "unrealized_pnl": round(unrealized_pnl, 4),
+                "unrealized_pnl_pct": round(unrealized_pct, 2),
+                "badge": "ACTIVE_SHORT" if is_short else "ACTIVE_LONG",
+                "indicator": "red_glow" if is_short else "green_glow",
+                "last_scan_result": "open_position",
+            })
+        else:
+            # Determine scan result from today's scan logs (best-effort from score/features)
+            score_val = score.get("score", 0)
+            sym_blocked = any(
+                symbol in bl for bl in blocked_symbols.values()
+            )
+
+            if sym_blocked:
+                scan_counts["blocked_signals"] += 1
+                entry["status"] = "blocked"
+                entry["last_scan_result"] = "blocked"
+                entry["signal"] = "blocked"
+                entry["reject_reason"] = "symbol_performance_blocked"
+            elif score_val > 0:
+                entry["signal"] = "no_signal"
+                entry["last_scan_result"] = "no_signal"
+                entry["status"] = "scanned"
+                scan_counts["no_signal"] += 1
+            else:
+                entry["signal"] = "no_signal"
+                entry["last_scan_result"] = "no_signal"
+                entry["status"] = "scanned"
+                scan_counts["no_signal"] += 1
+
+        symbol_entries.append(entry)
+
+    return {
+        "symbols": symbol_entries,
+        "counts": scan_counts,
+        "active_position_symbols": list(positions.keys()),
+        "scanned_symbols": list(candles.keys()),
+    }
 
 
 # ── Durum raporu ──────────────────────────────────────────────────────────────
@@ -1206,6 +1334,18 @@ def _print_status(state: dict, prices: dict[str, float], equity: float,
 
     print()
     print(f"  Toplam tamamlanan trade: {total_closed}")
+    print()
+    print("  SCANNER:")
+    for sym in (symbols or []):
+        pos = state["positions"].get(sym)
+        if pos:
+            cur = prices.get(sym, pos["entry_price"])
+            is_short = pos.get("side") == "short"
+            pnl_p = ((pos["entry_price"] - cur) / pos["entry_price"] * 100) if is_short else ((cur - pos["entry_price"]) / pos["entry_price"] * 100)
+            label = "ACTIVE SHORT" if is_short else "ACTIVE LONG"
+            print(f"  {sym:<14} {label:<14} {pnl_p:>+6.2f}%")
+        else:
+            print(f"  {sym:<14} no_signal")
     print("═" * 62 + "\n")
 
 
