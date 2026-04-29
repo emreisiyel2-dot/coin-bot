@@ -101,6 +101,14 @@ LIQUIDITY_MIN_VOLUME_SMA  = 0       # coin-denominated; just check > 0
 LIQUIDITY_MIN_ATR_PCT     = 0.10
 LIQUIDITY_MAX_STALE_MIN   = 30.0
 
+# ── Volatility-based position sizing ─────────────────────────────────────────
+VOL_SIZE_LOW_PCT   = 0.30
+VOL_SIZE_MID_PCT   = 0.60
+VOL_SIZE_HIGH_PCT  = 1.00
+VOL_SIZE_LOW_MULT  = 0.75
+VOL_SIZE_MID_MULT  = 0.50
+VOL_SIZE_HIGH_MULT = 0.35
+
 STATE_FILE = Path(__file__).parent / "intraday_state.json"
 
 
@@ -141,6 +149,21 @@ def _reset_state() -> None:
 def _save_state(state: dict) -> None:
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2, default=str)
+
+
+def get_volatility_size_multiplier(atr_pct: float) -> float:
+    """Return a size multiplier based on ATR% volatility.
+
+    atr_pct is already a percentage value (e.g. 0.18 = 0.18%).
+    Higher volatility → smaller multiplier. Never exceeds 1.0.
+    """
+    if atr_pct < VOL_SIZE_LOW_PCT:
+        return 1.0
+    if atr_pct < VOL_SIZE_MID_PCT:
+        return VOL_SIZE_LOW_MULT
+    if atr_pct < VOL_SIZE_HIGH_PCT:
+        return VOL_SIZE_MID_MULT
+    return VOL_SIZE_HIGH_MULT
 
 
 # ── Yardımcılar ───────────────────────────────────────────────────────────────
@@ -236,6 +259,7 @@ def _open_position(
     evt: EventLogger | None = None,
     strategy_name: str = "rsi_reversion",
     side: str = "long",
+    atr_pct: float | None = None,
 ) -> None:
     alloc  = allocated_usdt(state["positions"])
     sizing = compute_position_size(
@@ -271,6 +295,23 @@ def _open_position(
         sizing = SizingResult(allowed=True, quantity=capped_qty,
                               size_usdt=max_size, reason="capped")
 
+    # Volatility-based position sizing: reduce size for high-volatility symbols
+    base_size_usdt = sizing.size_usdt
+    vol_multiplier = 1.0
+    if atr_pct is not None:
+        vol_multiplier = get_volatility_size_multiplier(atr_pct)
+        if vol_multiplier < 1.0:
+            vol_size_usdt = base_size_usdt * vol_multiplier
+            vol_qty = vol_size_usdt / price
+            logger.info(
+                "VOLATILITY SIZE | symbol=%s | strategy=%s | atr_pct=%.2f%% | "
+                "multiplier=%.2f | base_size=%.2f | final_size=%.2f",
+                symbol, strategy_name, atr_pct, vol_multiplier,
+                base_size_usdt, vol_size_usdt,
+            )
+            sizing = SizingResult(allowed=True, quantity=vol_qty,
+                                  size_usdt=vol_size_usdt, reason="vol_adjusted")
+
     cost = sizing.quantity * price
     state["cash"] -= cost
 
@@ -292,6 +333,10 @@ def _open_position(
         "strategy":    strategy_name,
         "side":        "short" if is_short else "long",
         "risk_per_trade_pct": RISK_PER_TRADE_PCT,
+        "atr_pct_at_entry": round(atr_pct, 4) if atr_pct is not None else None,
+        "volatility_multiplier": round(vol_multiplier, 2),
+        "base_position_size": round(base_size_usdt, 2),
+        "final_position_size": round(sizing.size_usdt, 2),
     }
     state["sym_last_trade"][symbol] = now_str
 
@@ -308,6 +353,8 @@ def _open_position(
         "entry_price": price,
         "tp": tp_price,
         "sl": sl_price,
+        "atr_pct_at_entry": round(atr_pct, 4) if atr_pct is not None else None,
+        "volatility_multiplier": round(vol_multiplier, 2),
     })
 
     send_alert("SHORT_OPENED" if is_short else "TRADE_OPENED",
@@ -992,7 +1039,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
                     tl_before = len(state["trade_log"])
                     _open_position(state, symbol, prices[symbol], equity, now_str, evt=evt,
-                                   strategy_name=sm, side=trade_side)
+                                   strategy_name=sm, side=trade_side,
+                                   atr_pct=_feat.get("atr_pct"))
                     open_count += 1
                     if len(state["trade_log"]) > tl_before:
                         e = state["trade_log"][-1]
