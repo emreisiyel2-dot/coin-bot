@@ -25,6 +25,7 @@ from core.fast_exit import evaluate_exit, evaluate_position_scaling
 from core.signal_score import score_signal, score_signal_short
 from core.alerts import send_alert
 from core.market_regime import apply_regime_filter, determine_market_regime
+from live.strategy_router import select_strategies
 from core.symbol_universe import filter_valid_symbols, get_symbols
 from indicators.feature_engine import compute_feature_snapshot
 from live.event_logger import EventLogger, capture_exception, write_dashboard_summary
@@ -63,7 +64,7 @@ COOLDOWN_MINUTES         = RSI_REVERSION_CONFIG["cooldown_minutes"]
 INITIAL_CASH             = 10_000.0
 SCORE_MIN_TO_TRADE       = 60
 SCORE_MIN_TO_TRADE_MOMENTUM = 45
-INTRADAY_STRATEGY_MODE   = "rsi_reversion"
+INTRADAY_STRATEGY_MODE   = "auto"
 
 # ── Post-exit cooldown per symbol ────────────────────────────────────────────
 COOLDOWN_AFTER_STOP_LOSS_MINUTES      = 180
@@ -544,22 +545,16 @@ def _maybe_reset_daily(state: dict, today: str, prices: dict[str, float]) -> Non
 
 def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         dry_run: bool = False, symbol_mode: str = DEFAULT_SYMBOL_MODE) -> None:
-    valid_modes = ("rsi_reversion", "momentum_pullback_v1", "short_momentum_v1", "trend_pullback_v1")
+    valid_modes = ("auto", "rsi_reversion", "momentum_pullback_v1", "short_momentum_v1", "trend_pullback_v1")
     if strategy_mode not in valid_modes:
         raise ValueError(f"Unknown strategy_mode: {strategy_mode!r}. Use: {valid_modes}")
     if symbol_mode not in ("core", "expanded", "dynamic"):
         raise ValueError(f"Unknown symbol_mode: {symbol_mode!r}. Use: 'core', 'expanded', 'dynamic'")
 
-    if strategy_mode == "rsi_reversion":
-        strategy = RsiReversionStrategy()
-    elif strategy_mode == "short_momentum_v1":
-        strategy = ShortMomentumV1Strategy()
-    elif strategy_mode == "trend_pullback_v1":
-        strategy = TrendPullbackV1Strategy()
-    else:
-        strategy = MomentumPullbackV1Strategy()
-
-    is_short_mode = strategy_mode == "short_momentum_v1"
+    active_strategies: list[str] = []
+    is_auto = strategy_mode == "auto"
+    if not is_auto:
+        active_strategies = [strategy_mode]
 
     # Resolve symbols via universe module
     symbols_requested = get_symbols(symbol_mode)
@@ -572,7 +567,7 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         len(symbols_rejected), len(symbols_warnings),
     )
 
-    evt      = EventLogger(strategy_mode)
+    evt      = EventLogger(strategy_mode if is_auto else strategy_mode)
     state    = _load_state()
     exchange = ccxt.binance({"enableRateLimit": True})
     now      = datetime.now(timezone.utc)
@@ -656,12 +651,6 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         # Determine market regime from BTC/ETH features
         market_regime = determine_market_regime(features_map)
 
-        # Re-score with short-aware model for short_momentum_v1
-        if is_short_mode:
-            for sym in list(scores_map.keys()):
-                scores_map[sym] = score_signal_short(
-                    features_map[sym], market_regime=market_regime)
-
         logger.info(
             "MARKET REGIME | %s (conf=%d) | symbols_scanned=%d | liquidity_blocked=%d",
             market_regime["regime"], market_regime["confidence"],
@@ -676,8 +665,14 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
         if status_only:
             _print_status(state, prices, equity, APPROVED_SYMBOLS,
-                          strategy_mode=strategy_mode)
+                          strategy_mode=strategy_mode,
+                          active_strategies=active_strategies if is_auto else [strategy_mode])
             return
+
+        # ── Resolve active strategies ─────────────────────────────────────────
+        if is_auto:
+            active_strategies = select_strategies(market_regime["regime"])
+        # else: active_strategies already set to [strategy_mode]
 
         # ── Açık pozisyonlar: Fast Exit Engine ───────────────────────────────────
         for symbol in list(state["positions"].keys()):
@@ -756,184 +751,210 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         if guard.blocked:
             logger.warning("GÜNLÜK KORUMA AKTİF | %s", guard.reason)
 
-        # ── Yeni sinyal tara ──────────────────────────────────────────────────────
+        # ── Yeni sinyal tara (per strategy) ──────────────────────────────────────
         open_count = len(state["positions"])
 
-        for symbol in APPROVED_SYMBOLS:
-            if symbol not in candles:
-                continue
-            _feat  = features_map.get(symbol, {})
-            _score = scores_map.get(symbol, {})
-
-            if symbol in state["positions"]:
-                evt.log_scan(symbol, "candidate_rejected",
-                             reject_reason="position_limit_per_symbol",
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             features=_feat, score_decision=_score,
-                             checks={"position_open": True, "max_per_symbol": MAX_POSITIONS_PER_SYMBOL})
-                continue
-            # Post-exit cooldown check
-            blocked, cooldown_info = _check_exit_cooldown(state, symbol, now)
-            if blocked:
-                evt.log_scan(symbol, "candidate_rejected",
-                             reject_reason="post_exit_cooldown",
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             features=_feat, score_decision=_score,
-                             checks={"cooldown_until": cooldown_info.get("cooldown_until"),
-                                     "last_exit_reason": cooldown_info.get("last_exit_reason")})
-                send_alert("TRADE_BLOCKED_COOLDOWN", {"symbol": symbol,
-                           "reason": f"post_exit_cooldown: {cooldown_info.get('last_exit_reason', '')}"})
-                continue
-            if open_count >= MAX_CONCURRENT_POSITIONS:
-                evt.log_scan(symbol, "candidate_rejected",
-                             reject_reason="position_limit_reached",
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             features=_feat, score_decision=_score,
-                             checks={"open_positions": open_count, "max_concurrent": MAX_CONCURRENT_POSITIONS})
-                break
-            if guard.blocked:
-                evt.log_scan(symbol, "candidate_rejected",
-                             reject_reason="daily_loss_guard",
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             features=_feat, score_decision=_score,
-                             checks={"daily_loss_guard": False})
-                break
-            if not _cooldown_ok(state, symbol, now):
-                evt.log_scan(symbol, "candidate_rejected",
-                             reject_reason="cooldown_active",
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             features=_feat, score_decision=_score,
-                             checks={"cooldown_ok": False},
-                             cooldown_minutes=COOLDOWN_MINUTES)
-                continue
-
-            # Regime filter
-            if strategy_mode == "momentum_pullback_v1":
-                regime_allowed, regime_reason = apply_regime_filter(
-                    market_regime, symbol, _feat, _score.get("score", 0))
-                if not regime_allowed:
-                    evt.log_scan(symbol, "candidate_rejected",
-                                 reject_reason=regime_reason,
-                                 timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                                 features=_feat, score_decision=_score,
-                                 checks={"market_regime": market_regime["regime"],
-                                         "regime_confidence": market_regime["confidence"]})
-                    continue
-            elif strategy_mode == "short_momentum_v1":
-                if market_regime.get("regime") != "bearish":
-                    evt.log_scan(symbol, "candidate_rejected",
-                                 reject_reason="regime_not_bearish",
-                                 timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                                 features=_feat, score_decision=_score,
-                                 checks={"market_regime": market_regime.get("regime"),
-                                         "regime_confidence": market_regime.get("confidence")})
-                    continue
-            # trend_pullback_v1: no external regime filter — strategy handles it internally
-
-            bars_loaded = len(candles[symbol])
-
-            # Strategy dispatch
-            if strategy_mode == "momentum_pullback_v1":
-                signal = strategy.generate_signal(
-                    symbol=symbol, features=_feat, score_decision=_score)
-            elif strategy_mode == "short_momentum_v1":
-                signal = strategy.generate_signal(
-                    symbol=symbol, features=_feat, score_decision=_score)
-            elif strategy_mode == "trend_pullback_v1":
-                signal = strategy.generate_signal(
-                    symbol=symbol, features=_feat, score_decision=_score,
-                    market_regime=market_regime)
+        for sm in active_strategies:
+            # Instantiate strategy for this loop iteration
+            if sm == "rsi_reversion":
+                strategy = RsiReversionStrategy()
+            elif sm == "short_momentum_v1":
+                strategy = ShortMomentumV1Strategy()
+            elif sm == "trend_pullback_v1":
+                strategy = TrendPullbackV1Strategy()
             else:
-                min_bars_required = max(
-                    EMA_TREND_PERIOD + 1,
-                    RSI_REVERSION_CONFIG.get("ema_slow_period", 50) + 1,
-                    RSI_REVERSION_CONFIG.get("rsi_period", 7) + 1,
-                )
-                try:
-                    signal = strategy.generate_signal(candles[symbol])
-                except ValueError as exc:
-                    logger.debug("Sinyal hatası | %s | %s", symbol, exc)
+                strategy = MomentumPullbackV1Strategy()
+
+            sm_is_short = sm == "short_momentum_v1"
+
+            # Re-score with short-aware model for short_momentum_v1
+            if sm_is_short:
+                for sym in list(scores_map.keys()):
+                    scores_map[sym] = score_signal_short(
+                        features_map[sym], market_regime=market_regime)
+
+            logger.info("STRATEGY SCAN | %s | symbols=%d", sm, len(APPROVED_SYMBOLS))
+
+            for symbol in APPROVED_SYMBOLS:
+                if symbol not in candles:
+                    continue
+                _feat  = features_map.get(symbol, {})
+                _score = scores_map.get(symbol, {})
+
+                if symbol in state["positions"]:
+                    existing_sm = state["positions"][symbol].get("strategy", "unknown")
+                    logger.info("SIGNAL CONFLICT | %s | existing=%s | new=%s",
+                                symbol, existing_sm, sm)
                     evt.log_scan(symbol, "candidate_rejected",
-                                 reject_reason="insufficient_bars",
-                                 bars_loaded=bars_loaded, min_bars_required=min_bars_required,
-                                 fetch_limit=LOOKBACK_BARS,
-                                 timeframe=TIMEFRAME, strategy_mode=strategy_mode,
+                                 reject_reason="signal_conflict",
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
                                  features=_feat, score_decision=_score,
-                                 checks={"bars_ok": False})
+                                 checks={"position_open": True,
+                                         "existing_strategy": existing_sm,
+                                         "new_strategy": sm})
+                    continue
+                # Post-exit cooldown check
+                blocked, cooldown_info = _check_exit_cooldown(state, symbol, now)
+                if blocked:
+                    evt.log_scan(symbol, "candidate_rejected",
+                                 reject_reason="post_exit_cooldown",
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
+                                 features=_feat, score_decision=_score,
+                                 checks={"cooldown_until": cooldown_info.get("cooldown_until"),
+                                         "last_exit_reason": cooldown_info.get("last_exit_reason")})
+                    send_alert("TRADE_BLOCKED_COOLDOWN", {"symbol": symbol,
+                               "reason": f"post_exit_cooldown: {cooldown_info.get('last_exit_reason', '')}"})
+                    continue
+                if open_count >= MAX_CONCURRENT_POSITIONS:
+                    evt.log_scan(symbol, "candidate_rejected",
+                                 reject_reason="position_limit_reached",
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
+                                 features=_feat, score_decision=_score,
+                                 checks={"open_positions": open_count, "max_concurrent": MAX_CONCURRENT_POSITIONS})
+                    break
+                if guard.blocked:
+                    evt.log_scan(symbol, "candidate_rejected",
+                                 reject_reason="daily_loss_guard",
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
+                                 features=_feat, score_decision=_score,
+                                 checks={"daily_loss_guard": False})
+                    break
+                if not _cooldown_ok(state, symbol, now):
+                    evt.log_scan(symbol, "candidate_rejected",
+                                 reject_reason="cooldown_active",
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
+                                 features=_feat, score_decision=_score,
+                                 checks={"cooldown_ok": False},
+                                 cooldown_minutes=COOLDOWN_MINUTES)
                     continue
 
-            if signal in (Signal.BUY, Signal.SELL, Signal.SHORT):
-                is_short_signal = signal in (Signal.SELL, Signal.SHORT)
-                trade_side = "short" if is_short_signal else "long"
-
-                # Score check — skip for trend_pullback_v1 (uses internal scoring)
-                if strategy_mode != "trend_pullback_v1":
-                    score_val = _score.get("score", 0)
-                    score_threshold = (SCORE_MIN_TO_TRADE_MOMENTUM
-                                       if strategy_mode == "momentum_pullback_v1"
-                                       else SCORE_MIN_TO_TRADE)
-                    if score_val < score_threshold:
+                # Regime filter
+                if sm == "momentum_pullback_v1":
+                    regime_allowed, regime_reason = apply_regime_filter(
+                        market_regime, symbol, _feat, _score.get("score", 0))
+                    if not regime_allowed:
                         evt.log_scan(symbol, "candidate_rejected",
-                                     reject_reason="score_below_trade_threshold",
-                                     bars_loaded=bars_loaded,
-                                     timeframe=TIMEFRAME, strategy_mode=strategy_mode,
+                                     reject_reason=regime_reason,
+                                     timeframe=TIMEFRAME, strategy_mode=sm,
                                      features=_feat, score_decision=_score,
-                                     score_used_for_trade=False,
-                                     score_threshold_used=score_threshold,
-                                     checks={"strategy_signal": signal.value,
-                                             "score": score_val,
-                                             "threshold": score_threshold})
-                        logger.info("SCORE BLOCK | %s | score=%d < threshold=%d (%s)",
-                                    symbol, score_val, score_threshold, strategy_mode)
+                                     checks={"market_regime": market_regime["regime"],
+                                             "regime_confidence": market_regime["confidence"]})
                         continue
+                elif sm == "short_momentum_v1":
+                    if market_regime.get("regime") != "bearish":
+                        evt.log_scan(symbol, "candidate_rejected",
+                                     reject_reason="regime_not_bearish",
+                                     timeframe=TIMEFRAME, strategy_mode=sm,
+                                     features=_feat, score_decision=_score,
+                                     checks={"market_regime": market_regime.get("regime"),
+                                             "regime_confidence": market_regime.get("confidence")})
+                        continue
+                # trend_pullback_v1: no external regime filter — strategy handles it internally
+
+                bars_loaded = len(candles[symbol])
+
+                # Strategy dispatch
+                if sm == "momentum_pullback_v1":
+                    signal = strategy.generate_signal(
+                        symbol=symbol, features=_feat, score_decision=_score)
+                elif sm == "short_momentum_v1":
+                    signal = strategy.generate_signal(
+                        symbol=symbol, features=_feat, score_decision=_score)
+                elif sm == "trend_pullback_v1":
+                    signal = strategy.generate_signal(
+                        symbol=symbol, features=_feat, score_decision=_score,
+                        market_regime=market_regime)
                 else:
-                    score_val = getattr(strategy, "last_score", 0)
-                    score_threshold = TREND_PULLBACK_SCORE_MIN
+                    min_bars_required = max(
+                        EMA_TREND_PERIOD + 1,
+                        RSI_REVERSION_CONFIG.get("ema_slow_period", 50) + 1,
+                        RSI_REVERSION_CONFIG.get("rsi_period", 7) + 1,
+                    )
+                    try:
+                        signal = strategy.generate_signal(candles[symbol])
+                    except ValueError as exc:
+                        logger.debug("Sinyal hatası | %s | %s", symbol, exc)
+                        evt.log_scan(symbol, "candidate_rejected",
+                                     reject_reason="insufficient_bars",
+                                     bars_loaded=bars_loaded, min_bars_required=min_bars_required,
+                                     fetch_limit=LOOKBACK_BARS,
+                                     timeframe=TIMEFRAME, strategy_mode=sm,
+                                     features=_feat, score_decision=_score,
+                                     checks={"bars_ok": False})
+                        continue
 
-                signal_label = "SHORT" if is_short_signal else "BUY"
-                # Include strategy's internal decision for trend_pullback_v1
-                tp_decision = getattr(strategy, "last_decision", {})
+                if signal in (Signal.BUY, Signal.SELL, Signal.SHORT):
+                    is_short_signal = signal in (Signal.SELL, Signal.SHORT)
+                    trade_side = "short" if is_short_signal else "long"
 
-                evt.log_scan(symbol, "signal_accepted",
-                             bars_loaded=bars_loaded,
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             side=trade_side,
-                             market_regime=market_regime,
-                             features=_feat, score_decision=_score,
-                             score_used_for_trade=True,
-                             score_threshold_used=score_threshold,
-                             decision=tp_decision if strategy_mode == "trend_pullback_v1" else None,
-                             checks={"strategy_signal": signal_label,
-                                     "score": score_val,
-                                     "threshold": score_threshold,
-                                     "side": trade_side})
+                    # Score check — skip for trend_pullback_v1 (uses internal scoring)
+                    if sm != "trend_pullback_v1":
+                        score_val = _score.get("score", 0)
+                        score_threshold = (SCORE_MIN_TO_TRADE_MOMENTUM
+                                           if sm == "momentum_pullback_v1"
+                                           else SCORE_MIN_TO_TRADE)
+                        if score_val < score_threshold:
+                            evt.log_scan(symbol, "candidate_rejected",
+                                         reject_reason="score_below_trade_threshold",
+                                         bars_loaded=bars_loaded,
+                                         timeframe=TIMEFRAME, strategy_mode=sm,
+                                         features=_feat, score_decision=_score,
+                                         score_used_for_trade=False,
+                                         score_threshold_used=score_threshold,
+                                         checks={"strategy_signal": signal.value,
+                                                 "score": score_val,
+                                                 "threshold": score_threshold})
+                            logger.info("SCORE BLOCK | %s | score=%d < threshold=%d (%s)",
+                                        symbol, score_val, score_threshold, sm)
+                            continue
+                    else:
+                        score_val = getattr(strategy, "last_score", 0)
+                        score_threshold = TREND_PULLBACK_SCORE_MIN
 
-                if dry_run:
-                    logger.info("DRY-RUN | %s | would %s @ %.4f (skipped)",
-                                symbol, signal_label, prices[symbol])
+                    signal_label = "SHORT" if is_short_signal else "BUY"
+                    # Include strategy's internal decision for trend_pullback_v1
+                    tp_decision = getattr(strategy, "last_decision", {})
+
+                    evt.log_scan(symbol, "signal_accepted",
+                                 bars_loaded=bars_loaded,
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
+                                 side=trade_side,
+                                 market_regime=market_regime,
+                                 features=_feat, score_decision=_score,
+                                 score_used_for_trade=True,
+                                 score_threshold_used=score_threshold,
+                                 decision=tp_decision if sm == "trend_pullback_v1" else None,
+                                 checks={"strategy_signal": signal_label,
+                                         "score": score_val,
+                                         "threshold": score_threshold,
+                                         "side": trade_side})
+
+                    if dry_run:
+                        logger.info("DRY-RUN | %s | would %s @ %.4f (skipped)",
+                                    symbol, signal_label, prices[symbol])
+                        open_count += 1
+                        continue
+
+                    tl_before = len(state["trade_log"])
+                    _open_position(state, symbol, prices[symbol], equity, now_str, evt=evt,
+                                   strategy_name=sm, side=trade_side)
                     open_count += 1
-                    continue
-
-                tl_before = len(state["trade_log"])
-                _open_position(state, symbol, prices[symbol], equity, now_str, evt=evt,
-                               strategy_name=strategy_mode, side=trade_side)
-                open_count += 1
-                if len(state["trade_log"]) > tl_before:
-                    e = state["trade_log"][-1]
-                    evt.log_trade(symbol, e["action"],
-                                  price=e.get("price"), quantity=e.get("quantity"),
-                                  size_usdt=e.get("size_usdt"), strategy=strategy_mode)
-            else:
-                reason = getattr(strategy, "last_rejection_reason", "")
-                tp_decision = getattr(strategy, "last_decision", {})
-                evt.log_scan(symbol, "no_signal" if not reason else "candidate_rejected",
-                             reject_reason=reason or None,
-                             bars_loaded=bars_loaded,
-                             timeframe=TIMEFRAME, strategy_mode=strategy_mode,
-                             side=getattr(strategy, "last_side", "") or "none",
-                             market_regime=market_regime,
-                             features=_feat, score_decision=_score,
-                             decision=tp_decision if strategy_mode == "trend_pullback_v1" else None)
+                    if len(state["trade_log"]) > tl_before:
+                        e = state["trade_log"][-1]
+                        evt.log_trade(symbol, e["action"],
+                                      price=e.get("price"), quantity=e.get("quantity"),
+                                      size_usdt=e.get("size_usdt"), strategy=sm)
+                else:
+                    reason = getattr(strategy, "last_rejection_reason", "")
+                    tp_decision = getattr(strategy, "last_decision", {})
+                    evt.log_scan(symbol, "no_signal" if not reason else "candidate_rejected",
+                                 reject_reason=reason or None,
+                                 bars_loaded=bars_loaded,
+                                 timeframe=TIMEFRAME, strategy_mode=sm,
+                                 side=getattr(strategy, "last_side", "") or "none",
+                                 market_regime=market_regime,
+                                 features=_feat, score_decision=_score,
+                                 decision=tp_decision if sm == "trend_pullback_v1" else None)
 
         equity = _total_equity(state, prices)
         if equity > state["peak_equity"]:
@@ -950,7 +971,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
         _save_state(state)
         _print_status(state, prices, equity, APPROVED_SYMBOLS,
-                      strategy_mode=strategy_mode)
+                      strategy_mode=strategy_mode,
+                      active_strategies=active_strategies)
 
         evt.log_run("completed",
                     symbols_scanned=len(candles),
@@ -970,6 +992,7 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
         write_dashboard_summary(
             extra_fields={
                 "strategy": strategy_mode,
+                "active_strategies": active_strategies,
                 "symbol_mode": symbol_mode,
                 "total_symbols_requested": len(symbols_requested),
                 "total_symbols_valid": len(symbols_valid),
@@ -1004,7 +1027,8 @@ def run(status_only: bool = False, strategy_mode: str = INTRADAY_STRATEGY_MODE,
 
 def _print_status(state: dict, prices: dict[str, float], equity: float,
                   symbols: list[str] | None = None,
-                  strategy_mode: str = "rsi_reversion") -> None:
+                  strategy_mode: str = "rsi_reversion",
+                  active_strategies: list[str] | None = None) -> None:
     alloc  = allocated_usdt(state["positions"])
     u_pnl  = unrealized_pnl(state["positions"], prices)
     guard  = check_daily_loss_guard(
@@ -1019,7 +1043,11 @@ def _print_status(state: dict, prices: dict[str, float], equity: float,
     total_closed = len([t for t in trade_log if t["action"] == "CLOSE"])
 
     print("\n" + "═" * 62)
-    print(f"  INTRADAY TRADER — {strategy_mode.upper()} / 15M")
+    label = strategy_mode.upper()
+    if strategy_mode == "auto":
+        active = active_strategies if active_strategies else ["?"]
+        label = "AUTO [" + ", ".join(active) + "]"
+    print(f"  INTRADAY TRADER — {label} / 15M")
     print("═" * 62)
     print(f"  Zaman          : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
     print(f"  Cash           : {state['cash']:>10,.2f} USDT")
@@ -1115,8 +1143,8 @@ def main() -> None:
     p.add_argument("--status", action="store_true", help="Sadece durum göster")
     p.add_argument("--reset", action="store_true", help="State'i sıfırla (başlangıç capitaline dön)")
     p.add_argument("--strategy", default=INTRADAY_STRATEGY_MODE,
-                   choices=("rsi_reversion", "momentum_pullback_v1", "short_momentum_v1", "trend_pullback_v1"),
-                   help=f"Strategy mode (default: {INTRADAY_STRATEGY_MODE})")
+                   choices=("auto", "rsi_reversion", "momentum_pullback_v1", "short_momentum_v1", "trend_pullback_v1"),
+                   help=f"Strategy mode: 'auto' selects by regime (default: {INTRADAY_STRATEGY_MODE})")
     p.add_argument("--dry-run", action="store_true",
                    help="Scan and log decisions but do NOT open trades")
     p.add_argument("--symbols", default=DEFAULT_SYMBOL_MODE,
